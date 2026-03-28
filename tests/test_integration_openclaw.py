@@ -268,8 +268,9 @@ class TestTelegramBridge:
     @pytest.fixture
     def bridge(self, tg_config: TelegramConfig) -> TelegramBridge:
         b = TelegramBridge(config=tg_config, hub_base_url="http://localhost:8000")
-        b._bot = AsyncMock()
-        b._bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        b._system_bot = AsyncMock()
+        b._system_bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        b._agent_bots = {"apollo": b._system_bot, "rex": b._system_bot}
         b._http_client = AsyncMock()
         b._http_client.post = AsyncMock(return_value=MagicMock(status_code=200))
         return b
@@ -284,8 +285,8 @@ class TestTelegramBridge:
         )
         await bridge.on_hub_message(event)
 
-        bridge._bot.send_message.assert_called_once()
-        kwargs = bridge._bot.send_message.call_args[1]
+        bridge._agent_bots["apollo"].send_message.assert_called_once()
+        kwargs = bridge._agent_bots["apollo"].send_message.call_args[1]
         assert kwargs["chat_id"] == -1001234567890
         assert kwargs["message_thread_id"] == 20
         assert "Apollo" in kwargs["text"]
