@@ -18,6 +18,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from a2a.server.apps.jsonrpc.starlette_app import A2AStarletteApplication
+from a2a.types import AgentCapabilities, AgentCard, AgentSkill
+
 from src.channels.models import Channel, ChannelMember, MemberRole
 from src.channels.registry import ChannelRegistry
 from src.hub.handler import GroupChatHub
@@ -299,13 +302,43 @@ def create_app(storage_backend: str | None = None) -> Starlette:
         if telegram_bridge is not None:
             await telegram_bridge.stop()
 
+    # -- A2A Protocol endpoint (JSON-RPC) ------------------------------------
+
+    hub_url = os.environ.get("HUB_PUBLIC_URL", "http://localhost:8000")
+    hub_agent_card = AgentCard(
+        name="A2A Group Chat Hub",
+        description="Broadcasting hub for A2A agent group communication.",
+        url=hub_url,
+        version="1.0.0",
+        protocol_version="1.0",
+        capabilities=AgentCapabilities(streaming=True, push_notifications=False),
+        default_input_modes=["text"],
+        default_output_modes=["text"],
+        skills=[
+            AgentSkill(
+                id="group-broadcast",
+                name="Group Broadcast",
+                description="Send a message to all agents in a channel.",
+                tags=["broadcast", "group-chat"],
+            ),
+        ],
+    )
+
+    a2a_app = A2AStarletteApplication(
+        agent_card=hub_agent_card,
+        http_handler=hub,
+    )
+
+    # Merge REST routes + A2A protocol routes
+    all_routes = routes + a2a_app.routes()
+
     app = Starlette(
-        routes=routes,
+        routes=all_routes,
         middleware=middleware,
         lifespan=lifespan,
     )
 
-    # Store references for A2A integration
+    # Store references
     app.state.hub = hub
     app.state.registry = registry
     app.state.storage = storage
