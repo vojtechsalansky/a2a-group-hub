@@ -46,6 +46,32 @@ class TestFirstStrategy:
         assert len(task.artifacts) == 1
 
 
+class TestStrategyFallback:
+    def test_consensus_falls_back_to_all_and_reports_actual_strategy(self, three_results):
+        agg = Aggregator()
+        task = agg.aggregate(three_results, strategy=AggregationStrategy.consensus,
+                             task_id="t1", context_id="c1", channel_id="dev", channel_name="dev-team")
+        # Should report actual strategy as "all" (fallback), not "consensus"
+        assert task.metadata["strategy"] == "all"
+        assert task.metadata["requested_strategy"] == "consensus"
+        # Should still return all results
+        assert len(task.artifacts) == 3
+
+    def test_best_of_n_falls_back_to_all_and_reports_actual_strategy(self, three_results):
+        agg = Aggregator()
+        task = agg.aggregate(three_results, strategy=AggregationStrategy.best_of_n,
+                             task_id="t1", context_id="c1", channel_id="dev", channel_name="dev-team")
+        assert task.metadata["strategy"] == "all"
+        assert task.metadata["requested_strategy"] == "best_of_n"
+
+    def test_non_fallback_strategy_matches_requested(self, three_results):
+        agg = Aggregator()
+        task = agg.aggregate(three_results, strategy=AggregationStrategy.first,
+                             task_id="t1", context_id="c1", channel_id="dev", channel_name="dev-team")
+        assert task.metadata["strategy"] == "first"
+        assert task.metadata["requested_strategy"] == "first"
+
+
 class TestVotingStrategy:
     def test_voting_counts_responses(self):
         results = [

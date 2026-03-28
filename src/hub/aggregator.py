@@ -37,6 +37,7 @@ class Aggregator:
         channel_id: str,
         channel_name: str,
     ) -> Task:
+        actual_strategy = strategy
         if strategy == AggregationStrategy.first:
             artifacts = self._strategy_first(results, task_id)
         elif strategy == AggregationStrategy.voting:
@@ -44,6 +45,7 @@ class Aggregator:
         elif strategy in (AggregationStrategy.consensus, AggregationStrategy.best_of_n):
             # These need LLM — fall back to all with a note
             logger.warning(f"Strategy '{strategy.value}' requires LLM. Falling back to 'all'.")
+            actual_strategy = AggregationStrategy.all
             artifacts = self._strategy_all(results, task_id)
         else:
             artifacts = self._strategy_all(results, task_id)
@@ -67,7 +69,8 @@ class Aggregator:
             metadata={
                 "channel_id": channel_id,
                 "channel_name": channel_name,
-                "strategy": strategy.value,
+                "strategy": actual_strategy.value,
+                "requested_strategy": strategy.value,
                 "peer_count": len(results),
                 "success_count": success_count,
                 "error_count": len(results) - success_count,

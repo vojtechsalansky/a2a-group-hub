@@ -59,3 +59,29 @@ class TestFanOutEngine:
         engine = FanOutEngine()
         results = await engine.fan_out(ch, message_parts=[], sender_id=None, context_id="ctx")
         assert len(results) == 0
+
+    async def test_observer_done_callback_logs_exception(self):
+        """Observer fire-and-forget tasks should have a done callback that logs errors."""
+        engine = FanOutEngine()
+
+        async def failing_send(member, **kwargs):
+            raise RuntimeError("Observer delivery exploded")
+
+        engine._send_to_agent = failing_send
+
+        ch = Channel(channel_id="dev", name="dev-team")
+        ch.add_member(ChannelMember(agent_id="rex", name="Rex", url="http://localhost:9001"))
+        ch.add_member(ChannelMember(
+            agent_id="vigil", name="Vigil", url="http://localhost:9003", role=MemberRole.observer
+        ))
+
+        # Fan out from rex — vigil (observer) should get fire-and-forget
+        # This should not raise, even though observer delivery fails
+        results = await engine.fan_out(ch, message_parts=[], sender_id="rex", context_id="ctx")
+
+        # Allow observer task to complete
+        import asyncio
+        await asyncio.sleep(0.05)
+
+        # No member results since only vigil (observer) is a peer and not sendable
+        assert len(results) == 0

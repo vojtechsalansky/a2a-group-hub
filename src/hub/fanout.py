@@ -40,6 +40,15 @@ class FanOutEngine:
         if self._owns_client:
             await self._http_client.aclose()
 
+    @staticmethod
+    def _observer_done_callback(task: asyncio.Task) -> None:
+        """Log exceptions from observer fire-and-forget tasks."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(f"Observer task {task.get_name()} failed: {exc}")
+
     async def fan_out(
         self,
         channel: Channel,
@@ -57,12 +66,14 @@ class FanOutEngine:
             f"Fan-out in #{channel.name}: {len(sendable)} members, {len(observers)} observers"
         )
 
-        # Fire-and-forget to observers
+        # Fire-and-forget to observers (tracked with error logging callback)
         for obs in observers:
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self._send_to_agent(obs, message_parts=message_parts, channel=channel,
-                                     context_id=context_id, metadata=message_metadata)
+                                     context_id=context_id, metadata=message_metadata),
+                name=f"observer-{obs.agent_id}",
             )
+            task.add_done_callback(self._observer_done_callback)
 
         if not sendable:
             return []

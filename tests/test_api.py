@@ -72,6 +72,26 @@ class TestMemberAPI:
         assert resp.status_code == 200
 
 
+class TestValidationAPI:
+    async def test_create_channel_missing_name(self, client):
+        resp = await client.post("/api/channels", json={"channel_id": "dev"})
+        assert resp.status_code == 400
+        assert "name" in resp.json()["error"]
+
+    async def test_add_member_missing_required_fields(self, client):
+        await client.post("/api/channels", json={"name": "dev", "channel_id": "dev"})
+        resp = await client.post("/api/channels/dev/members", json={"agent_id": "rex"})
+        assert resp.status_code == 400
+        assert "name" in resp.json()["error"]
+        assert "url" in resp.json()["error"]
+
+    async def test_add_member_missing_agent_id(self, client):
+        await client.post("/api/channels", json={"name": "dev", "channel_id": "dev"})
+        resp = await client.post("/api/channels/dev/members", json={"name": "Rex", "url": "http://localhost:9001"})
+        assert resp.status_code == 400
+        assert "agent_id" in resp.json()["error"]
+
+
 class TestStatusAPI:
     async def test_hub_status(self, client):
         resp = await client.get("/api/status")

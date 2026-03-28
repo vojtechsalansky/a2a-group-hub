@@ -65,6 +65,10 @@ def create_app(storage_backend: str = "memory") -> Starlette:
     if storage_backend == "memory":
         storage: StorageBackend = InMemoryBackend()
     else:
+        logger.warning(
+            f"Requested storage backend '{storage_backend}' is not available. "
+            "Falling back to in-memory backend. Install qdrant/neo4j extras for production use."
+        )
         storage = InMemoryBackend()
 
     registry = ChannelRegistry(storage)
@@ -74,6 +78,8 @@ def create_app(storage_backend: str = "memory") -> Starlette:
 
     async def create_channel(request: Request) -> JSONResponse:
         body = await request.json()
+        if "name" not in body:
+            return JSONResponse({"error": "Missing required field: name"}, status_code=400)
         ch = await registry.create_channel(
             name=body["name"],
             channel_id=body.get("channel_id"),
@@ -121,6 +127,12 @@ def create_app(storage_backend: str = "memory") -> Starlette:
         if not ch:
             return JSONResponse({"error": "Channel not found"}, status_code=404)
         body = await request.json()
+        missing = [f for f in ("agent_id", "name", "url") if f not in body]
+        if missing:
+            return JSONResponse(
+                {"error": f"Missing required field(s): {', '.join(missing)}"},
+                status_code=400,
+            )
         role = MemberRole(body.get("role", "member"))
         member = ChannelMember(
             agent_id=body["agent_id"],
