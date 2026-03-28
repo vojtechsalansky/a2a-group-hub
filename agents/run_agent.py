@@ -25,11 +25,14 @@ def build_agent_card(name: str, port: int) -> AgentCard:
         url=f"http://localhost:{port}/",
         version="1.0.0",
         capabilities=AgentCapabilities(streaming=False),
+        defaultInputModes=["text"],
+        defaultOutputModes=["text"],
         skills=[
             AgentSkill(
                 id=name,
                 name=name,
                 description=f"Group chat participant ({name})",
+                tags=["group-chat"],
             )
         ],
     )

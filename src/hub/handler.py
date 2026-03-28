@@ -168,8 +168,9 @@ class GroupChatHub(RequestHandler):
         peers = channel.get_sendable_peers(exclude_agent_id=sender_id)
 
         yield TaskStatusUpdateEvent(
-            task_id=task_id,
-            context_id=channel.context_id,
+            taskId=task_id,
+            contextId=channel.context_id,
+            final=False,
             status=TaskStatus(
                 state=TaskState.working,
                 timestamp=datetime.now(timezone.utc).isoformat(),
@@ -193,8 +194,8 @@ class GroupChatHub(RequestHandler):
         for i, r in enumerate(results):
             text = r.error and f"[Error]: {r.error}" or r.response_text or "[No response]"
             yield TaskArtifactUpdateEvent(
-                task_id=task_id,
-                context_id=channel.context_id,
+                taskId=task_id,
+                contextId=channel.context_id,
                 artifact=Artifact(
                     artifact_id=f"{task_id}-{i}",
                     name=f"Response from {r.agent_name}",
@@ -204,8 +205,9 @@ class GroupChatHub(RequestHandler):
 
         channel.message_count += 1
         yield TaskStatusUpdateEvent(
-            task_id=task_id,
-            context_id=channel.context_id,
+            taskId=task_id,
+            contextId=channel.context_id,
+            final=True,
             status=TaskStatus(
                 state=TaskState.completed,
                 timestamp=datetime.now(timezone.utc).isoformat(),
