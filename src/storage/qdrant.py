@@ -34,7 +34,7 @@ class QdrantBackend(StorageBackend):
     """
 
     COLLECTION = "hub_messages"
-    EMBEDDING_MODEL = "voyage-3-lite"
+    EMBEDDING_MODEL = "voyage-3"
     VECTOR_SIZE = 1024
 
     def __init__(self, url: str = "http://localhost:6333", collection: str | None = None):
