@@ -97,20 +97,19 @@ class Neo4jBackend(StorageBackend):
         return channel
 
     async def list_channels(self) -> list[Channel]:
-        query = "MATCH (c:HubChannel) RETURN c"
-        channels: list[Channel] = []
+        # Must load members too — handler uses list_channels for context_id resolution
+        channel_ids: list[str] = []
+        query = "MATCH (c:HubChannel) RETURN c.channel_id AS channel_id"
         async with self._driver.session() as session:
             result = await session.run(query)
             async for record in result:
-                c_data = record["c"]
-                channels.append(Channel(
-                    channel_id=c_data["channel_id"],
-                    name=c_data["name"],
-                    context_id=c_data.get("context_id", ""),
-                    default_aggregation=c_data.get("default_aggregation", "all"),
-                    agent_timeout=c_data.get("agent_timeout", 60),
-                    message_count=c_data.get("message_count", 0),
-                ))
+                channel_ids.append(record["channel_id"])
+        # Use get_channel which properly loads members via HAS_MEMBER join
+        channels: list[Channel] = []
+        for cid in channel_ids:
+            ch = await self.get_channel(cid)
+            if ch:
+                channels.append(ch)
         return channels
 
     async def delete_channel(self, channel_id: str) -> bool:
