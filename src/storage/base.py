@@ -20,6 +20,9 @@ class StoredMessage:
     context_id: str
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict = field(default_factory=dict)
+    project_id: str | None = None
+    tags: list[str] = field(default_factory=list)
+    reply_to_message_id: str | None = None
 
 
 @dataclass
@@ -62,6 +65,9 @@ class StorageBackend(ABC):
 
     @abstractmethod
     async def search_messages(self, channel_id: str, query: str, limit: int = 10) -> list[StoredMessage]: ...
+
+    @abstractmethod
+    async def search_all_messages(self, query: str, limit: int = 10) -> list[StoredMessage]: ...
 
     # Webhooks
     @abstractmethod
