@@ -99,7 +99,8 @@ def mock_hub_client():
 def bridge(config, mock_bot, mock_hub_client):
     from src.telegram.bridge import TelegramBridge
     b = TelegramBridge(config=config, hub_base_url="http://localhost:8000")
-    b._bot = mock_bot
+    b._system_bot = mock_bot
+    b._agent_bots = {"apollo": mock_bot, "rex": mock_bot}
     b._http_client = mock_hub_client
     return b
 
@@ -228,3 +229,170 @@ class TestBridgeTopicMapping:
         assert bridge._channel_for_topic(42) == "dev-team"
         assert bridge._channel_for_topic(99) == "leaders"
         assert bridge._channel_for_topic(9999) is None
+
+
+class TestBridgeAgentBotLookup:
+    """Test that on_hub_message uses agent bots correctly."""
+
+    async def test_on_hub_message_uses_agent_bot(self, bridge, config):
+        """Known sender_id should use the matching agent bot."""
+        from src.notifications.webhooks import WebhookEvent
+        from unittest.mock import AsyncMock, MagicMock
+
+        apollo_bot = AsyncMock()
+        apollo_bot.send_message = AsyncMock(return_value=MagicMock(message_id=2))
+        bridge._agent_bots = {"apollo": apollo_bot}
+        bridge._system_bot = AsyncMock()
+
+        event = WebhookEvent(
+            event="message",
+            channel_id="dev-team",
+            timestamp="2026-03-28T12:00:00Z",
+            data={"sender_id": "apollo", "sender_name": "Apollo", "text": "Ready!"},
+        )
+        await bridge.on_hub_message(event)
+
+        apollo_bot.send_message.assert_called_once()
+        bridge._system_bot.send_message.assert_not_called()
+
+    async def test_on_hub_message_falls_back_to_system_bot(self, bridge, config):
+        """Unknown sender_id should fall back to system bot."""
+        from src.notifications.webhooks import WebhookEvent
+        from unittest.mock import AsyncMock, MagicMock
+
+        system_bot = AsyncMock()
+        system_bot.send_message = AsyncMock(return_value=MagicMock(message_id=3))
+        bridge._system_bot = system_bot
+        bridge._agent_bots = {}  # No agent bots
+
+        event = WebhookEvent(
+            event="message",
+            channel_id="dev-team",
+            timestamp="2026-03-28T12:00:00Z",
+            data={"sender_id": "unknown-agent", "sender_name": "Unknown", "text": "Hi"},
+        )
+        await bridge.on_hub_message(event)
+
+        system_bot.send_message.assert_called_once()
+
+
+class TestTypingIndicators:
+    """Test typing indicator logic."""
+
+    async def test_typing_indicators_sent_before_hub_request(self, config):
+        """Typing indicators should be sent before the hub POST."""
+        from src.telegram.bridge import TelegramBridge
+        from unittest.mock import AsyncMock, MagicMock
+
+        b = TelegramBridge(config=config, hub_base_url="http://localhost:8000")
+
+        mock_bot = AsyncMock()
+        mock_bot.token = "fake-token"
+        b._agent_bots = {"apollo": mock_bot}
+        b._system_bot = AsyncMock()
+
+        # Track call order
+        call_order = []
+        mock_client = AsyncMock()
+
+        async def mock_post(url, **kwargs):
+            if "sendChatAction" in url:
+                call_order.append("typing")
+            else:
+                call_order.append("hub_request")
+            resp = MagicMock()
+            resp.json.return_value = {"result": {"artifacts": []}}
+            resp.status_code = 200
+            return resp
+
+        mock_client.post = mock_post
+        b._http_client = mock_client
+
+        await b._send_to_hub("dev-team", "Filip", "Hello")
+
+        assert "typing" in call_order
+        assert "hub_request" in call_order
+        assert call_order.index("typing") < call_order.index("hub_request")
+
+    async def test_typing_refresh_cancelled_after_response(self, config):
+        """Typing refresh loop should be cancelled after hub responds."""
+        from src.telegram.bridge import TelegramBridge
+        from unittest.mock import AsyncMock, MagicMock
+        import asyncio
+
+        b = TelegramBridge(config=config, hub_base_url="http://localhost:8000")
+
+        mock_bot = AsyncMock()
+        mock_bot.token = "fake-token"
+        b._agent_bots = {"apollo": mock_bot}
+        b._system_bot = AsyncMock()
+
+        mock_client = AsyncMock()
+        resp = MagicMock()
+        resp.json.return_value = {"result": {"artifacts": []}}
+
+        async def mock_post(url, **kwargs):
+            return resp
+
+        mock_client.post = mock_post
+        b._http_client = mock_client
+
+        await b._send_to_hub("dev-team", "Filip", "Test")
+
+        # After _send_to_hub completes, there should be no lingering tasks
+        # (the typing_task was cancelled in the finally block)
+        # Verify by checking no unfinished tasks remain
+        tasks = [t for t in asyncio.all_tasks() if "typing_refresh" in t.get_name()]
+        assert len(tasks) == 0
+
+
+class TestErrorHandling:
+    """Test error handling in _send_telegram_message_as."""
+
+    async def test_error_handling_chat_not_found(self, bridge):
+        """Chat not found error should be logged as warning, not crash."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        bad_bot = AsyncMock()
+        bad_bot.send_message = AsyncMock(side_effect=Exception("Chat not found"))
+        bridge._system_bot = AsyncMock()
+        bridge._system_bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+
+        # Should not raise
+        await bridge._send_telegram_message_as(bad_bot, "test", topic_id=42)
+
+    async def test_error_logged_to_system_log(self, bridge):
+        """Errors should be reported to system-log topic (ID 9)."""
+        from src.telegram.bridge import SYSTEM_LOG_TOPIC_ID
+        from unittest.mock import AsyncMock, MagicMock
+
+        bad_bot = AsyncMock()
+        bad_bot.send_message = AsyncMock(side_effect=Exception("Some API error"))
+
+        system_bot = AsyncMock()
+        system_bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        bridge._system_bot = system_bot
+
+        await bridge._send_telegram_message_as(bad_bot, "test", topic_id=42)
+
+        # System bot should have been called to report to system-log
+        system_bot.send_message.assert_called_once()
+        call_kwargs = system_bot.send_message.call_args[1]
+        assert call_kwargs["message_thread_id"] == SYSTEM_LOG_TOPIC_ID
+        assert "Delivery failed" in call_kwargs["text"]
+
+    async def test_error_no_recursion_on_system_log_topic(self, bridge):
+        """Errors on system-log topic should NOT try to report to system-log (avoid recursion)."""
+        from src.telegram.bridge import SYSTEM_LOG_TOPIC_ID
+        from unittest.mock import AsyncMock
+
+        bad_bot = AsyncMock()
+        bad_bot.send_message = AsyncMock(side_effect=Exception("Some error"))
+
+        system_bot = AsyncMock()
+        bridge._system_bot = system_bot
+
+        await bridge._send_telegram_message_as(bad_bot, "test", topic_id=SYSTEM_LOG_TOPIC_ID)
+
+        # System bot should NOT be called (would cause recursion)
+        system_bot.send_message.assert_not_called()

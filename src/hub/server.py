@@ -254,7 +254,7 @@ def create_app(storage_backend: str | None = None) -> Starlette:
         try:
             from telegram import Update
             body = await request.json()
-            update = Update.de_json(body, telegram_bridge._bot)
+            update = Update.de_json(body, telegram_bridge._system_bot)
             if update and update.message:
                 await telegram_bridge.on_telegram_message(update)
             return JSONResponse({"ok": True})

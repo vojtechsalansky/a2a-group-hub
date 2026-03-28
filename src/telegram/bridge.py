@@ -161,6 +161,27 @@ class TelegramBridge:
 
         await self._send_to_hub(channel_id, user_name, text)
 
+    # ── Typing indicators ──────────────────────────────────────
+
+    async def _send_typing_indicators(self, channel_id: str, topic_id: int) -> None:
+        """Send typing action via all agent bots for this channel."""
+        for agent_id, bot in self._agent_bots.items():
+            try:
+                url = f"https://api.telegram.org/bot{bot.token}/sendChatAction"
+                await self._http_client.post(url, json={
+                    "chat_id": self._config.chat_id,
+                    "message_thread_id": topic_id,
+                    "action": "typing",
+                })
+            except Exception:
+                pass  # Never crash on typing indicator failure
+
+    async def _typing_refresh_loop(self, channel_id: str, topic_id: int) -> None:
+        """Refresh typing indicator every 5 seconds until cancelled."""
+        while True:
+            await asyncio.sleep(5)
+            await self._send_typing_indicators(channel_id, topic_id)
+
     # ── Telegram -> Hub ──────────────────────────────────────
 
     async def _send_to_hub(self, channel_id: str, sender_name: str, text: str) -> None:
@@ -182,6 +203,15 @@ class TelegramBridge:
             },
         }
 
+        # Start typing indicators before hub request
+        topic_id = self._config.channel_topic_map.get(channel_id)
+        typing_task = None
+        if topic_id is not None:
+            await self._send_typing_indicators(channel_id, topic_id)
+            typing_task = asyncio.create_task(
+                self._typing_refresh_loop(channel_id, topic_id)
+            )
+
         try:
             resp = await self._http_client.post(
                 f"{self._hub_base_url}/",
@@ -196,6 +226,13 @@ class TelegramBridge:
 
         except Exception:
             logger.exception("Failed to send to hub: #%s", channel_id)
+        finally:
+            if typing_task is not None:
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except asyncio.CancelledError:
+                    pass
 
     # ── Hub -> Telegram (per-agent bots) ─────────────────────
 
@@ -268,8 +305,10 @@ class TelegramBridge:
         else:
             msg = format_agent_message(sender_name, text)
 
-        bot = self._bot if hasattr(self, "_bot") and self._bot else self._system_bot
+        sender_id = data.get("sender_id", "").lower()
+        bot = self._agent_bots.get(sender_id, self._system_bot)
         if bot is None:
+            logger.warning("No bot available for sender '%s', skipping Telegram", sender_id)
             return
 
         kwargs = {"chat_id": self._config.chat_id, "text": msg}
@@ -333,5 +372,21 @@ class TelegramBridge:
             if topic_id is not None:
                 kwargs["message_thread_id"] = topic_id
             await bot.send_message(**kwargs)
-        except Exception:
-            logger.exception("Failed to send Telegram message to topic %s", topic_id)
+        except Exception as e:
+            error_msg = str(e)
+            if "Chat not found" in error_msg or "chat not found" in error_msg:
+                logger.warning("Bot not in group — skipping topic %s", topic_id)
+            elif "bot was blocked" in error_msg.lower():
+                logger.warning("Bot blocked — skipping topic %s", topic_id)
+            else:
+                logger.exception("Telegram send failed for topic %s", topic_id)
+            # Report to system-log (avoid recursion)
+            if self._system_bot and topic_id != SYSTEM_LOG_TOPIC_ID:
+                try:
+                    await self._system_bot.send_message(
+                        chat_id=self._config.chat_id,
+                        text=f"⚠ Delivery failed (topic {topic_id}): {error_msg[:200]}",
+                        message_thread_id=SYSTEM_LOG_TOPIC_ID,
+                    )
+                except Exception:
+                    pass
