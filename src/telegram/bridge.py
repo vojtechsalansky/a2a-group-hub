@@ -248,6 +248,81 @@ class TelegramBridge:
 
             await self._send_telegram_message_as(bot, msg_text, topic_id)
 
+    # ── Public API (used by webhook dispatcher & server) ───
+
+    async def on_hub_message(self, event) -> None:
+        """Handle a WebhookEvent from the hub and forward to Telegram."""
+        if event.event != "message":
+            return
+
+        data = event.data
+        sender_name = data.get("sender_name", data.get("sender_id", "Agent"))
+        text = data.get("text", "")
+        if not text:
+            return
+
+        topic_id = self._config.channel_topic_map.get(event.channel_id)
+
+        if sender_name.lower() == "system":
+            msg = format_system_message(text)
+        else:
+            msg = format_agent_message(sender_name, text)
+
+        bot = self._bot if hasattr(self, "_bot") and self._bot else self._system_bot
+        if bot is None:
+            return
+
+        kwargs = {"chat_id": self._config.chat_id, "text": msg}
+        if topic_id is not None:
+            kwargs["message_thread_id"] = topic_id
+
+        try:
+            await bot.send_message(**kwargs)
+        except Exception:
+            logger.exception("Failed to send hub message to Telegram")
+
+    async def on_telegram_message(self, update) -> None:
+        """Handle a Telegram Update object and forward to the hub."""
+        message = update.message
+        if message is None:
+            return
+
+        chat_id = message.chat.id
+        if chat_id != self._config.chat_id:
+            return
+
+        topic_id = message.message_thread_id
+        if topic_id is None:
+            return
+
+        channel_id = self._channel_for_topic(topic_id)
+        if channel_id is None:
+            return
+
+        text = message.text or ""
+        if not text:
+            return
+
+        user_name = getattr(message.from_user, "first_name", "Unknown")
+        logger.info("Telegram -> Hub: [%s] in #%s: %s", user_name, channel_id, text[:80])
+
+        if self._http_client is None:
+            return
+
+        payload = {
+            "sender_name": user_name,
+            "text": text,
+            "source": "telegram",
+        }
+        try:
+            await self._http_client.post(
+                f"{self._hub_base_url}/api/channels/{channel_id}/messages",
+                json=payload,
+                timeout=30.0,
+            )
+        except Exception:
+            logger.exception("Failed to forward Telegram message to hub: #%s", channel_id)
+
     async def _send_telegram_message_as(self, bot, text: str, topic_id: int | None = None) -> None:
         """Send a message using a specific bot instance."""
         if bot is None:

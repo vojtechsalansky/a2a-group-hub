@@ -73,19 +73,26 @@ def create_app(storage_backend: str | None = None) -> Starlette:
 
     # Storage
     if backend == "composite":
-        from src.storage.neo4j_backend import Neo4jBackend
-        from src.storage.qdrant import QdrantBackend
-        from src.storage.composite import CompositeBackend
+        try:
+            from src.storage.neo4j_backend import Neo4jBackend
+            from src.storage.qdrant import QdrantBackend
+            from src.storage.composite import CompositeBackend
 
-        neo4j = Neo4jBackend(
-            url=os.environ.get("NEO4J_URL", "bolt://localhost:7687"),
-            user=os.environ.get("NEO4J_USER", "neo4j"),
-            password=os.environ.get("NEO4J_PASSWORD", "password"),
-        )
-        qdrant = QdrantBackend(
-            url=os.environ.get("QDRANT_URL", "http://localhost:6333"),
-        )
-        storage: StorageBackend = CompositeBackend(neo4j_backend=neo4j, qdrant_backend=qdrant)
+            neo4j = Neo4jBackend(
+                url=os.environ.get("NEO4J_URL", "bolt://localhost:7687"),
+                user=os.environ.get("NEO4J_USER", "neo4j"),
+                password=os.environ.get("NEO4J_PASSWORD", "password"),
+            )
+            qdrant = QdrantBackend(
+                url=os.environ.get("QDRANT_URL", "http://localhost:6333"),
+            )
+            storage: StorageBackend = CompositeBackend(neo4j_backend=neo4j, qdrant_backend=qdrant)
+        except (ImportError, Exception) as exc:
+            logger.warning(
+                "Composite backend unavailable (%s). Falling back to in-memory backend.",
+                exc,
+            )
+            storage = InMemoryBackend()
     elif backend == "memory":
         storage = InMemoryBackend()
     else:
