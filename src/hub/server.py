@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 
@@ -60,11 +62,14 @@ def _serialize_member(m: ChannelMember) -> dict:
     }
 
 
-def create_app(storage_backend: str = "memory") -> Starlette:
+def create_app(storage_backend: str | None = None) -> Starlette:
     """Factory that builds the full Starlette application."""
 
+    # Resolve backend from arg or env (uvicorn --factory calls with no args)
+    backend = storage_backend or os.environ.get("STORAGE_BACKEND", "memory")
+
     # Storage
-    if storage_backend == "composite":
+    if backend == "composite":
         from src.storage.neo4j_backend import Neo4jBackend
         from src.storage.qdrant import QdrantBackend
         from src.storage.composite import CompositeBackend
@@ -78,12 +83,13 @@ def create_app(storage_backend: str = "memory") -> Starlette:
             url=os.environ.get("QDRANT_URL", "http://localhost:6333"),
         )
         storage: StorageBackend = CompositeBackend(neo4j_backend=neo4j, qdrant_backend=qdrant)
-    elif storage_backend == "memory":
+    elif backend == "memory":
         storage = InMemoryBackend()
     else:
         logger.warning(
-            f"Requested storage backend '{storage_backend}' is not available. "
-            "Falling back to in-memory backend. Install qdrant/neo4j extras for production use."
+            "Requested storage backend '%s' is not available. "
+            "Falling back to in-memory backend. Install qdrant/neo4j extras for production use.",
+            backend,
         )
         storage = InMemoryBackend()
 
@@ -227,6 +233,25 @@ def create_app(storage_backend: str = "memory") -> Starlette:
             return JSONResponse({"error": "Webhook not found"}, status_code=404)
         return JSONResponse({"deleted": True})
 
+    # -- Telegram webhook endpoint ---------------------------------------------
+
+    telegram_bridge = None
+
+    async def telegram_webhook(request: Request) -> JSONResponse:
+        """Receive Telegram Bot API webhook updates."""
+        if telegram_bridge is None:
+            return JSONResponse({"error": "Telegram bridge not enabled"}, status_code=503)
+        try:
+            from telegram import Update
+            body = await request.json()
+            update = Update.de_json(body, telegram_bridge._bot)
+            if update and update.message:
+                await telegram_bridge.on_telegram_message(update)
+            return JSONResponse({"ok": True})
+        except Exception:
+            logger.exception("Error processing Telegram webhook")
+            return JSONResponse({"error": "Processing failed"}, status_code=500)
+
     # -- Build app ----------------------------------------------------------
 
     routes = [
@@ -242,13 +267,43 @@ def create_app(storage_backend: str = "memory") -> Starlette:
         Route("/api/channels/{channel_id}/webhooks", list_webhooks, methods=["GET"]),
         Route("/api/channels/{channel_id}/webhooks/{webhook_id}", delete_webhook, methods=["DELETE"]),
         Route("/api/status", hub_status, methods=["GET"]),
+        Route("/api/telegram/webhook", telegram_webhook, methods=["POST"]),
     ]
 
     middleware = [
         Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
     ]
 
-    app = Starlette(routes=routes, middleware=middleware)
+    # -- Lifespan (startup + shutdown) -----------------------------------------
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncGenerator[None, None]:
+        nonlocal telegram_bridge
+
+        # Startup
+        if os.environ.get("BOOTSTRAP_CHANNELS", "").lower() in ("true", "1", "yes"):
+            logger.info("BOOTSTRAP_CHANNELS enabled — running channel bootstrap")
+            await bootstrap_channels(registry)
+
+        if os.environ.get("TELEGRAM_ENABLED", "").lower() in ("true", "1", "yes"):
+            from src.telegram.config import TelegramConfig
+            from src.telegram.bridge import TelegramBridge
+            tg_config = TelegramConfig.from_env()
+            telegram_bridge = TelegramBridge(config=tg_config, hub_base_url="http://localhost:8000")
+            await telegram_bridge.start()
+            logger.info("Telegram bridge started")
+
+        yield
+
+        # Shutdown
+        if telegram_bridge is not None:
+            await telegram_bridge.stop()
+
+    app = Starlette(
+        routes=routes,
+        middleware=middleware,
+        lifespan=lifespan,
+    )
 
     # Store references for A2A integration
     app.state.hub = hub

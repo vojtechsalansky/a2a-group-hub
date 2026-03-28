@@ -18,13 +18,14 @@ storage = [
     "neo4j>=5.25",
     "fastembed>=0.4",
 ]
+telegram = ["python-telegram-bot>=22.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "httpx",
     "ruff>=0.8",
 ]
-all = ["a2a-group-hub[llm,storage,dev]"]
+all = ["a2a-group-hub[llm,storage,telegram,dev]"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
