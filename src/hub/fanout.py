@@ -105,9 +105,28 @@ class FanOutEngine:
         try:
             client = A2AClient(httpx_client=self._http_client, url=member.url)
 
+            # Build channel context prefix
+            member_list = []
+            for m in channel.members.values():
+                role_tag = f" ({m.role.value})" if m.role.value != "member" else ""
+                member_list.append(f"{m.name}{role_tag}")
+            context_prefix = f"[Kanál: #{channel.name} | Členové: {', '.join(member_list)}]\n"
+
+            # Prepend channel context to message text
+            enriched_parts = []
+            for part in message_parts:
+                if hasattr(part, 'root') and hasattr(part.root, 'text'):
+                    enriched_parts.append(Part(root=TextPart(text=context_prefix + part.root.text)))
+                else:
+                    enriched_parts.append(part)
+
+            # If no text parts found, add context as new part
+            if not enriched_parts:
+                enriched_parts = [Part(root=TextPart(text=context_prefix))]
+
             outbound = Message(
                 role=Role.user,
-                parts=message_parts,
+                parts=enriched_parts,
                 message_id=str(uuid.uuid4()),
                 context_id=context_id,
                 metadata={

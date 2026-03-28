@@ -3,6 +3,7 @@
 
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
+from a2a.types import Part, TextPart
 from src.channels.models import Channel, ChannelMember, MemberRole
 from src.hub.fanout import FanOutEngine, FanOutResult
 
@@ -85,3 +86,77 @@ class TestFanOutEngine:
 
         # No member results since only vigil (observer) is a peer and not sendable
         assert len(results) == 0
+
+    async def test_channel_context_prepended_to_message(self, channel):
+        """Fan-out should prepend channel name and member list to message text."""
+        engine = FanOutEngine()
+        captured_parts: list = []
+
+        original_send = engine._send_to_agent
+
+        async def capture_send(member, *, message_parts, channel, context_id, metadata=None):
+            """Intercept _send_to_agent to capture the enriched parts it builds."""
+            # We can't easily capture what happens inside _send_to_agent since it
+            # creates the Message internally. Instead, test the logic directly.
+            pass
+
+        # Test the enrichment logic directly by calling _send_to_agent with a
+        # mock A2AClient and capturing the outbound message.
+        original_text = "Hello team!"
+        parts = [Part(root=TextPart(text=original_text))]
+
+        with patch("src.hub.fanout.A2AClient") as MockClient:
+            mock_instance = MagicMock()
+            mock_response = MagicMock()
+            mock_result = MagicMock()
+            mock_result.result = MagicMock(spec=[])
+            mock_result.result.parts = []
+            mock_response.root = mock_result
+            mock_instance.send_message = AsyncMock(return_value=mock_response)
+            MockClient.return_value = mock_instance
+
+            target = channel.members["pixel"]
+            await engine._send_to_agent(
+                target, message_parts=parts, channel=channel, context_id="ctx"
+            )
+
+            # Extract the message that was sent
+            call_args = mock_instance.send_message.call_args
+            request = call_args[0][0]
+            sent_parts = request.params.message.parts
+            sent_text = sent_parts[0].root.text
+
+            # Verify context prefix is present
+            assert sent_text.startswith("[Kanál: #dev-team |")
+            assert "Členové:" in sent_text
+            assert "Rex" in sent_text
+            assert "Pixel" in sent_text
+            assert "Vigil (observer)" in sent_text
+            # Verify original text is preserved after prefix
+            assert sent_text.endswith(original_text)
+
+    async def test_channel_context_added_when_no_text_parts(self, channel):
+        """When message has no text parts, context should be added as a new part."""
+        engine = FanOutEngine()
+
+        with patch("src.hub.fanout.A2AClient") as MockClient:
+            mock_instance = MagicMock()
+            mock_response = MagicMock()
+            mock_result = MagicMock()
+            mock_result.result = MagicMock(spec=[])
+            mock_result.result.parts = []
+            mock_response.root = mock_result
+            mock_instance.send_message = AsyncMock(return_value=mock_response)
+            MockClient.return_value = mock_instance
+
+            target = channel.members["pixel"]
+            await engine._send_to_agent(
+                target, message_parts=[], channel=channel, context_id="ctx"
+            )
+
+            call_args = mock_instance.send_message.call_args
+            request = call_args[0][0]
+            sent_parts = request.params.message.parts
+
+            assert len(sent_parts) == 1
+            assert sent_parts[0].root.text.startswith("[Kanál: #dev-team |")
