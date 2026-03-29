@@ -163,24 +163,34 @@ class TelegramBridge:
 
     # ── Typing indicators ──────────────────────────────────────
 
-    async def _send_typing_indicators(self, channel_id: str, topic_id: int) -> None:
-        """Send typing action via all agent bots for this channel."""
-        for agent_id, bot in self._agent_bots.items():
+    async def _send_typing_indicator(self, agent_id: str, topic_id: int) -> None:
+        """Send typing action for a specific agent only."""
+        bot = self._agent_bots.get(agent_id, self._system_bot)
+        if bot is None:
+            return
+        try:
+            url = f"https://api.telegram.org/bot{bot.token}/sendChatAction"
+            await self._http_client.post(url, json={
+                "chat_id": self._config.chat_id,
+                "message_thread_id": topic_id,
+                "action": "typing",
+            })
+        except Exception:
+            pass  # Never crash on typing indicator failure
+
+    async def _typing_refresh_loop(self, topic_id: int) -> None:
+        """Refresh typing indicator every 5 seconds using system bot until cancelled."""
+        while True:
+            await asyncio.sleep(5)
             try:
-                url = f"https://api.telegram.org/bot{bot.token}/sendChatAction"
+                url = f"https://api.telegram.org/bot{self._system_bot.token}/sendChatAction"
                 await self._http_client.post(url, json={
                     "chat_id": self._config.chat_id,
                     "message_thread_id": topic_id,
                     "action": "typing",
                 })
             except Exception:
-                pass  # Never crash on typing indicator failure
-
-    async def _typing_refresh_loop(self, channel_id: str, topic_id: int) -> None:
-        """Refresh typing indicator every 5 seconds until cancelled."""
-        while True:
-            await asyncio.sleep(5)
-            await self._send_typing_indicators(channel_id, topic_id)
+                pass
 
     # ── Telegram -> Hub ──────────────────────────────────────
 
@@ -203,13 +213,21 @@ class TelegramBridge:
             },
         }
 
-        # Start typing indicators before hub request
+        # Start typing indicator (system bot only) before hub request
         topic_id = self._config.channel_topic_map.get(channel_id)
         typing_task = None
         if topic_id is not None:
-            await self._send_typing_indicators(channel_id, topic_id)
+            try:
+                url = f"https://api.telegram.org/bot{self._system_bot.token}/sendChatAction"
+                await self._http_client.post(url, json={
+                    "chat_id": self._config.chat_id,
+                    "message_thread_id": topic_id,
+                    "action": "typing",
+                })
+            except Exception:
+                pass
             typing_task = asyncio.create_task(
-                self._typing_refresh_loop(channel_id, topic_id)
+                self._typing_refresh_loop(topic_id)
             )
 
         try:
@@ -254,6 +272,10 @@ class TelegramBridge:
 
             agent_name = name.replace("Response from ", "")
             agent_id = agent_name.lower()
+
+            # Send typing indicator for THIS specific agent before their message
+            if topic_id is not None:
+                await self._send_typing_indicator(agent_id, topic_id)
 
             # Detect errors — skip DNS errors silently, log others to system-log
             is_dns_error = "Temporary failure in name resolution" in text

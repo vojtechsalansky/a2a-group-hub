@@ -280,16 +280,16 @@ class TestTypingIndicators:
     """Test typing indicator logic."""
 
     async def test_typing_indicators_sent_before_hub_request(self, config):
-        """Typing indicators should be sent before the hub POST."""
+        """Typing indicator (system bot) should be sent before the hub POST."""
         from src.telegram.bridge import TelegramBridge
         from unittest.mock import AsyncMock, MagicMock
 
         b = TelegramBridge(config=config, hub_base_url="http://localhost:8000")
 
-        mock_bot = AsyncMock()
-        mock_bot.token = "fake-token"
-        b._agent_bots = {"apollo": mock_bot}
-        b._system_bot = AsyncMock()
+        system_bot = AsyncMock()
+        system_bot.token = "system-token"
+        b._agent_bots = {"apollo": AsyncMock()}
+        b._system_bot = system_bot
 
         # Track call order
         call_order = []
@@ -297,9 +297,9 @@ class TestTypingIndicators:
 
         async def mock_post(url, **kwargs):
             if "sendChatAction" in url:
-                call_order.append("typing")
+                call_order.append(("typing", url))
             else:
-                call_order.append("hub_request")
+                call_order.append(("hub_request", url))
             resp = MagicMock()
             resp.json.return_value = {"result": {"artifacts": []}}
             resp.status_code = 200
@@ -310,9 +310,12 @@ class TestTypingIndicators:
 
         await b._send_to_hub("dev-team", "Filip", "Hello")
 
-        assert "typing" in call_order
-        assert "hub_request" in call_order
-        assert call_order.index("typing") < call_order.index("hub_request")
+        assert any(t[0] == "typing" for t in call_order)
+        assert any(t[0] == "hub_request" for t in call_order)
+        # Typing should come before hub request
+        typing_idx = next(i for i, t in enumerate(call_order) if t[0] == "typing")
+        hub_idx = next(i for i, t in enumerate(call_order) if t[0] == "hub_request")
+        assert typing_idx < hub_idx
 
     async def test_typing_refresh_cancelled_after_response(self, config):
         """Typing refresh loop should be cancelled after hub responds."""
@@ -322,10 +325,10 @@ class TestTypingIndicators:
 
         b = TelegramBridge(config=config, hub_base_url="http://localhost:8000")
 
-        mock_bot = AsyncMock()
-        mock_bot.token = "fake-token"
-        b._agent_bots = {"apollo": mock_bot}
-        b._system_bot = AsyncMock()
+        system_bot = AsyncMock()
+        system_bot.token = "system-token"
+        b._agent_bots = {"apollo": AsyncMock()}
+        b._system_bot = system_bot
 
         mock_client = AsyncMock()
         resp = MagicMock()
@@ -344,6 +347,103 @@ class TestTypingIndicators:
         # Verify by checking no unfinished tasks remain
         tasks = [t for t in asyncio.all_tasks() if "typing_refresh" in t.get_name()]
         assert len(tasks) == 0
+
+    async def test_typing_indicator_singular_sends_for_one_agent(self, config):
+        """_send_typing_indicator should send exactly 1 HTTP POST for the specified agent."""
+        from src.telegram.bridge import TelegramBridge
+        from unittest.mock import AsyncMock, MagicMock
+
+        b = TelegramBridge(config=config, hub_base_url="http://localhost:8000")
+
+        nexus_bot = AsyncMock()
+        nexus_bot.token = "nexus-token"
+        apollo_bot = AsyncMock()
+        apollo_bot.token = "apollo-token"
+
+        b._agent_bots = {"nexus": nexus_bot, "apollo": apollo_bot}
+        b._system_bot = AsyncMock()
+        b._system_bot.token = "system-token"
+
+        post_calls = []
+        mock_client = AsyncMock()
+
+        async def mock_post(url, **kwargs):
+            post_calls.append(url)
+            return MagicMock()
+
+        mock_client.post = mock_post
+        b._http_client = mock_client
+
+        await b._send_typing_indicator("nexus", 3)
+
+        # Should be exactly 1 call, using nexus bot token
+        assert len(post_calls) == 1
+        assert "nexus-token" in post_calls[0]
+
+    async def test_typing_indicator_falls_back_to_system_bot(self, config):
+        """Unknown agent_id should fall back to system bot for typing."""
+        from src.telegram.bridge import TelegramBridge
+        from unittest.mock import AsyncMock, MagicMock
+
+        b = TelegramBridge(config=config, hub_base_url="http://localhost:8000")
+
+        system_bot = AsyncMock()
+        system_bot.token = "system-token"
+        b._agent_bots = {"nexus": AsyncMock()}
+        b._system_bot = system_bot
+
+        post_calls = []
+        mock_client = AsyncMock()
+
+        async def mock_post(url, **kwargs):
+            post_calls.append(url)
+            return MagicMock()
+
+        mock_client.post = mock_post
+        b._http_client = mock_client
+
+        await b._send_typing_indicator("unknown-agent", 3)
+
+        assert len(post_calls) == 1
+        assert "system-token" in post_calls[0]
+
+    async def test_send_to_hub_typing_uses_system_bot_only(self, config):
+        """Initial typing before hub call should use system bot token, not agent bot tokens."""
+        from src.telegram.bridge import TelegramBridge
+        from unittest.mock import AsyncMock, MagicMock
+
+        b = TelegramBridge(config=config, hub_base_url="http://localhost:8000")
+
+        system_bot = AsyncMock()
+        system_bot.token = "system-token"
+        apollo_bot = AsyncMock()
+        apollo_bot.token = "apollo-token"
+        rex_bot = AsyncMock()
+        rex_bot.token = "rex-token"
+
+        b._system_bot = system_bot
+        b._agent_bots = {"apollo": apollo_bot, "rex": rex_bot}
+
+        typing_urls = []
+        mock_client = AsyncMock()
+
+        async def mock_post(url, **kwargs):
+            if "sendChatAction" in url:
+                typing_urls.append(url)
+            resp = MagicMock()
+            resp.json.return_value = {"result": {"artifacts": []}}
+            return resp
+
+        mock_client.post = mock_post
+        b._http_client = mock_client
+
+        await b._send_to_hub("dev-team", "Filip", "Hello team")
+
+        # Only system bot token should appear in typing calls (not apollo/rex)
+        for url in typing_urls:
+            assert "system-token" in url
+            assert "apollo-token" not in url
+            assert "rex-token" not in url
 
 
 class TestErrorHandling:
