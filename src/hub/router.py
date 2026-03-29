@@ -37,19 +37,26 @@ class HierarchicalRouter:
         """True if the router has cached data and can make routing decisions."""
         return bool(self._channel_leads)
 
-    async def initialize(self) -> None:
-        """Load routing data from Neo4j at startup. Cache for fast lookup."""
+    async def initialize(self, max_retries: int = 5, retry_delay: float = 3.0) -> None:
+        """Load routing data from Neo4j at startup with retry. Cache for fast lookup."""
         if not self._driver:
             logger.warning("No Neo4j driver — router disabled, falling back to broadcast")
             return
 
-        try:
-            await self._load_channel_leads()
-            await self._load_delegation_rules()
-        except Exception:
-            logger.exception("Failed to initialize router — falling back to broadcast")
-            self._channel_leads.clear()
-            self._delegates_cache.clear()
+        for attempt in range(1, max_retries + 1):
+            try:
+                await self._load_channel_leads()
+                await self._load_delegation_rules()
+                return  # Success
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning("Router init attempt %d/%d failed (%s), retrying in %.0fs...", attempt, max_retries, e, retry_delay)
+                    import asyncio
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.exception("Failed to initialize router after %d attempts — falling back to broadcast", max_retries)
+                    self._channel_leads.clear()
+                    self._delegates_cache.clear()
 
     async def _load_channel_leads(self) -> None:
         async with self._driver.session() as session:
