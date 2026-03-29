@@ -91,7 +91,7 @@ class HierarchicalRouter:
 
     def parse_mentions(self, text: str) -> list[str]:
         """Parse @agent_name mentions from text. Case-insensitive."""
-        return re.findall(r"@(\w+)", text.lower())
+        return re.findall(r"@([\w-]+)", text.lower())
 
     def get_keyword_delegates(self, lead_id: str, message_text: str) -> list[str]:
         """Find delegates whose DELEGATES_TO keywords match the message."""
