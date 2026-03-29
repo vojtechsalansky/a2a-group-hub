@@ -24,6 +24,7 @@ from a2a.types import AgentCapabilities, AgentCard, AgentSkill
 from src.channels.models import Channel, ChannelMember, MemberRole
 from src.channels.registry import ChannelRegistry
 from src.hub.handler import GroupChatHub
+from src.observability.metrics import MetricsCollector
 from src.storage.memory import InMemoryBackend
 
 # Router is optional — may not exist yet
@@ -117,8 +118,9 @@ def create_app(storage_backend: str | None = None) -> Starlette:
         except Exception:
             logger.warning("Could not create HierarchicalRouter — routing disabled")
 
+    metrics = MetricsCollector()
     registry = ChannelRegistry(storage)
-    hub = GroupChatHub(registry=registry, storage=storage, router=router)
+    hub = GroupChatHub(registry=registry, storage=storage, router=router, metrics=metrics)
 
     # -- REST route handlers ------------------------------------------------
 
@@ -219,12 +221,16 @@ def create_app(storage_backend: str | None = None) -> Starlette:
     async def hub_status(request: Request) -> JSONResponse:
         channels = await registry.list_channels()
         total_members = sum(len(ch.members) for ch in channels)
+        metrics.update_counts(len(channels), total_members)
         return JSONResponse({
             "status": "running",
             "channels": len(channels),
             "total_members": total_members,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
+
+    async def api_metrics(request: Request) -> JSONResponse:
+        return JSONResponse(metrics.to_json())
 
     # -- Webhook API routes -------------------------------------------------
 
@@ -359,6 +365,7 @@ def create_app(storage_backend: str | None = None) -> Starlette:
         Route("/api/channels/{channel_id}/webhooks/{webhook_id}", delete_webhook, methods=["DELETE"]),
         Route("/api/session", create_session, methods=["POST"]),
         Route("/api/session/{agent_id}", get_session, methods=["GET"]),
+        Route("/api/metrics", api_metrics, methods=["GET"]),
         Route("/api/status", hub_status, methods=["GET"]),
         Route("/api/telegram/webhook", telegram_webhook, methods=["POST"]),
     ]
@@ -439,5 +446,6 @@ def create_app(storage_backend: str | None = None) -> Starlette:
     app.state.hub = hub
     app.state.registry = registry
     app.state.storage = storage
+    app.state.metrics = metrics
 
     return app

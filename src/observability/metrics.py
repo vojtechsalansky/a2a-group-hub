@@ -7,7 +7,7 @@ MAX_FANOUT_SAMPLES = 1000
 
 @dataclass
 class MetricsCollector:
-    """Collects and exposes hub metrics in Prometheus text format."""
+    """Collects and exposes hub metrics in Prometheus text and JSON formats."""
 
     channels_total: int = 0
     agents_total: int = 0
@@ -15,12 +15,16 @@ class MetricsCollector:
     fanout_durations: list[float] = field(default_factory=list)
     agent_errors: dict[str, int] = field(default_factory=dict)
     strategy_usage: dict[str, int] = field(default_factory=dict)
+    channel_message_counts: dict[str, int] = field(default_factory=dict)
     webhook_success: int = 0
     webhook_failure: int = 0
     _start_time: float = field(default_factory=time.time)
 
     def record_message(self) -> None:
         self.messages_total += 1
+
+    def record_channel_message(self, channel_id: str) -> None:
+        self.channel_message_counts[channel_id] = self.channel_message_counts.get(channel_id, 0) + 1
 
     def record_fanout_duration(self, duration: float) -> None:
         self.fanout_durations.append(duration)
@@ -49,6 +53,28 @@ class MetricsCollector:
         sorted_vals = sorted(values)
         idx = int(len(sorted_vals) * p / 100)
         return sorted_vals[min(idx, len(sorted_vals) - 1)]
+
+    def to_json(self) -> dict:
+        """Return metrics as a JSON-serializable dict."""
+        return {
+            "uptime_seconds": time.time() - self._start_time,
+            "messages_total": self.messages_total,
+            "channels_total": self.channels_total,
+            "agents_total": self.agents_total,
+            "fanout_latency": {
+                "p50": self._percentile(self.fanout_durations, 50),
+                "p95": self._percentile(self.fanout_durations, 95),
+                "p99": self._percentile(self.fanout_durations, 99),
+            },
+            "fanout_samples": len(self.fanout_durations),
+            "agent_errors": dict(self.agent_errors),
+            "strategy_usage": dict(self.strategy_usage),
+            "messages_per_channel": dict(self.channel_message_counts),
+            "webhook_deliveries": {
+                "success": self.webhook_success,
+                "failure": self.webhook_failure,
+            },
+        }
 
     def to_prometheus(self) -> str:
         """Render metrics in Prometheus text exposition format."""

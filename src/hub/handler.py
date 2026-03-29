@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from src.channels.permissions import PermissionError, check_can_send
 from src.channels.registry import ChannelRegistry
 from src.hub.aggregator import Aggregator, AggregationStrategy
 from src.hub.fanout import CircuitBreaker, FanOutEngine, FanOutResult
+from src.observability.metrics import MetricsCollector
 from src.storage.base import StorageBackend, StoredMessage
 
 # Router is optional — built by another agent, may not exist yet
@@ -42,10 +44,12 @@ class GroupChatHub(RequestHandler):
         registry: ChannelRegistry,
         storage: StorageBackend,
         router=None,
+        metrics: MetricsCollector | None = None,
     ) -> None:
         self.registry = registry
         self.storage = storage
         self._router = router
+        self._metrics = metrics
         self._circuit_breaker = CircuitBreaker()
         self._fanout_engine = FanOutEngine(circuit_breaker=self._circuit_breaker)
         self._aggregator = Aggregator()
@@ -236,6 +240,11 @@ class GroupChatHub(RequestHandler):
                 message_id=str(uuid.uuid4()),
             )
 
+        # Record metrics
+        if self._metrics:
+            self._metrics.record_message()
+            self._metrics.record_channel_message(channel.channel_id)
+
         # Extract text and persist incoming message
         text = self._extract_text(params.message)
         await self.storage.save_message(channel.channel_id, StoredMessage(
@@ -261,6 +270,7 @@ class GroupChatHub(RequestHandler):
             strategy = AggregationStrategy.all
 
         # Two-phase fan-out (falls back to broadcast without router)
+        fanout_start = time.time()
         results = await self._two_phase_fanout(
             channel=channel,
             message_parts=params.message.parts,
@@ -269,6 +279,8 @@ class GroupChatHub(RequestHandler):
             msg_meta=msg_meta,
             memory_context=memory_context,
         )
+        if self._metrics:
+            self._metrics.record_fanout_duration(time.time() - fanout_start)
 
         # Persist responses
         for r in results:
@@ -321,6 +333,11 @@ class GroupChatHub(RequestHandler):
             )
             return
 
+        # Record metrics
+        if self._metrics:
+            self._metrics.record_message()
+            self._metrics.record_channel_message(channel.channel_id)
+
         # Memory recall
         text = self._extract_text(params.message)
         incoming_id = params.message.message_id or ""
@@ -347,6 +364,7 @@ class GroupChatHub(RequestHandler):
         )
 
         # Two-phase fan-out (falls back to broadcast without router)
+        fanout_start = time.time()
         results = await self._two_phase_fanout(
             channel=channel,
             message_parts=params.message.parts,
@@ -355,6 +373,8 @@ class GroupChatHub(RequestHandler):
             msg_meta=msg_meta,
             memory_context=memory_context,
         )
+        if self._metrics:
+            self._metrics.record_fanout_duration(time.time() - fanout_start)
 
         for i, r in enumerate(results):
             resp_text = r.error and f"[Error]: {r.error}" or r.response_text or "[No response]"
