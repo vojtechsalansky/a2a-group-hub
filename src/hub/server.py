@@ -276,6 +276,73 @@ def create_app(storage_backend: str | None = None) -> Starlette:
             logger.exception("Error processing Telegram webhook")
             return JSONResponse({"error": "Processing failed"}, status_code=500)
 
+    # -- Session API routes ------------------------------------------------
+
+    async def create_session(request: Request) -> JSONResponse:
+        """POST /api/session -- Register or update an agent session in Neo4j."""
+        body = await request.json()
+        agent_id = body.get("agent_id")
+        session_id = body.get("session_id")
+        if not agent_id or not session_id:
+            return JSONResponse({"error": "agent_id and session_id required"}, status_code=400)
+
+        neo4j_backend = getattr(storage, '_neo4j', None)
+        if neo4j_backend is not None:
+            try:
+                async with neo4j_backend._driver.session() as neo_session:
+                    await neo_session.run("""
+                        MATCH (a:Agent) WHERE toLower(a.name) = toLower($agent_name)
+                        OPTIONAL MATCH (a)-[r:ACTIVE_SESSION]->()
+                        DELETE r
+                        WITH a
+                        MERGE (s:Session {session_id: $session_id})
+                        ON CREATE SET
+                            s.agent_id = $agent_id,
+                            s.created_at = datetime(),
+                            s.message_count = 0,
+                            s.status = 'active'
+                        ON MATCH SET
+                            s.message_count = s.message_count + 1
+                        MERGE (a)-[:HAS_SESSION]->(s)
+                        MERGE (a)-[:ACTIVE_SESSION]->(s)
+                        RETURN s.session_id AS session_id
+                    """, agent_name=agent_id, agent_id=agent_id, session_id=session_id)
+            except Exception as exc:
+                logger.warning("Failed to track session in Neo4j: %s", exc)
+                return JSONResponse({"status": "degraded", "error": str(exc)}, status_code=200)
+        else:
+            logger.debug("Neo4j not available -- session tracking skipped")
+
+        return JSONResponse({"status": "ok", "session_id": session_id}, status_code=201)
+
+    async def get_session(request: Request) -> JSONResponse:
+        """GET /api/session/{agent_id} -- Get latest session for an agent."""
+        agent_id = request.path_params["agent_id"]
+        neo4j_backend = getattr(storage, '_neo4j', None)
+        if neo4j_backend is not None:
+            try:
+                async with neo4j_backend._driver.session() as neo_session:
+                    result = await neo_session.run("""
+                        MATCH (a:Agent)-[:HAS_SESSION]->(s:Session)
+                        WHERE toLower(a.name) = toLower($agent_name)
+                        RETURN s.session_id AS session_id, s.created_at AS created_at,
+                               s.status AS status, s.message_count AS message_count
+                        ORDER BY s.created_at DESC
+                        LIMIT 1
+                    """, agent_name=agent_id)
+                    record = await result.single()
+                    if record:
+                        return JSONResponse({
+                            "session_id": record["session_id"],
+                            "created_at": str(record["created_at"]),
+                            "status": record["status"],
+                            "message_count": record["message_count"],
+                        })
+            except Exception as exc:
+                logger.warning("Failed to query session: %s", exc)
+
+        return JSONResponse({"error": "No session found"}, status_code=404)
+
     # -- Build app ----------------------------------------------------------
 
     routes = [
@@ -290,6 +357,8 @@ def create_app(storage_backend: str | None = None) -> Starlette:
         Route("/api/channels/{channel_id}/webhooks", create_webhook, methods=["POST"]),
         Route("/api/channels/{channel_id}/webhooks", list_webhooks, methods=["GET"]),
         Route("/api/channels/{channel_id}/webhooks/{webhook_id}", delete_webhook, methods=["DELETE"]),
+        Route("/api/session", create_session, methods=["POST"]),
+        Route("/api/session/{agent_id}", get_session, methods=["GET"]),
         Route("/api/status", hub_status, methods=["GET"]),
         Route("/api/telegram/webhook", telegram_webhook, methods=["POST"]),
     ]
