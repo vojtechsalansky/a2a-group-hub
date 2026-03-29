@@ -70,14 +70,18 @@ class CommandHandler:
         self._http = http_client
         self._hub_url = hub_base_url.rstrip("/")
 
+    # Docker service names differ from agent names for these agents
+    _SERVICE_NAMES = {"swift": "swift-agent", "echo": "echo-agent"}
+
     async def _check_agent_health(self, agent_name: str) -> dict | None:
         """Check a single agent's /health endpoint. Returns JSON dict or None."""
         info = AGENT_SERVICES.get(agent_name)
         if not info:
             return None
+        hostname = self._SERVICE_NAMES.get(agent_name, agent_name)
         try:
             resp = await self._http.get(
-                f"http://{agent_name}:{info['port']}/health",
+                f"http://{hostname}:{info['port']}/health",
                 timeout=3.0,
             )
             if resp.status_code == 200:
