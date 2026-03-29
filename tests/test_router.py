@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -256,3 +257,33 @@ class TestRoute:
 
         decision = await router.route("dev-team", "hello")
         assert decision.strategy == "broadcast_fallback"
+
+
+# -- Tests: Channel label fix (01-01) ----------------------------------------
+
+
+class TestChannelLabelFix:
+    """Verify the router queries use :Channel label and correct property names
+    matching the Neo4j seed data (not :HubChannel)."""
+
+    def test_query_uses_channel_label_not_hubchannel(self):
+        """The Cypher query in _load_channel_leads must use :Channel, not :HubChannel."""
+        source = inspect.getsource(HierarchicalRouter._load_channel_leads)
+        assert ":Channel" in source, "Expected :Channel label in _load_channel_leads query"
+        assert ":HubChannel" not in source, (
+            "Found :HubChannel in _load_channel_leads — should be :Channel to match seed data"
+        )
+
+    def test_channel_id_property_matches_seed_data(self):
+        """The Cypher query must return ch.channel_id (new seed data property)."""
+        source = inspect.getsource(HierarchicalRouter._load_channel_leads)
+        assert "ch.channel_id" in source, (
+            "Expected ch.channel_id in _load_channel_leads query to match seed data property"
+        )
+
+    def test_agent_id_property_matches_seed_data(self):
+        """The Cypher query must return a.agent_id (new seed data property)."""
+        source = inspect.getsource(HierarchicalRouter._load_channel_leads)
+        assert "a.agent_id" in source, (
+            "Expected a.agent_id in _load_channel_leads query to match seed data property"
+        )
