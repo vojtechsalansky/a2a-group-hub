@@ -17,6 +17,7 @@ import uuid
 
 import httpx
 
+from src.telegram.commands import CommandHandler
 from src.telegram.config import TelegramConfig
 from src.telegram.formatter import format_agent_message, format_system_message
 
@@ -38,6 +39,7 @@ class TelegramBridge:
         self._agent_bots: dict = {}     # agent_id → Bot instance
         self._http_client: httpx.AsyncClient | None = None
         self._polling_task: asyncio.Task | None = None
+        self._commands: CommandHandler | None = None
         self._running = False
         self._poll_offset = 0
 
@@ -65,6 +67,10 @@ class TelegramBridge:
             logger.info("Registered agent bot: %s", agent_id)
 
         self._http_client = httpx.AsyncClient(timeout=120.0)
+        self._commands = CommandHandler(
+            http_client=self._http_client,
+            hub_base_url=self._hub_base_url,
+        )
         self._running = True
 
         await self._flush_old_updates()
@@ -156,10 +162,77 @@ class TelegramBridge:
         if not text:
             return
 
+        # Command interceptor -- handle admin commands locally (do not forward to hub)
+        if text.startswith("/"):
+            await self._handle_command(text, message)
+            return
+
         user_name = from_user.get("first_name", "Unknown")
         logger.info("Telegram -> Hub: [%s] in #%s: %s", user_name, channel_id, text[:80])
 
         await self._send_to_hub(channel_id, user_name, text)
+
+    # ── Command handling ────────────────────────────────────────
+
+    async def _handle_command(self, text: str, message: dict) -> None:
+        """Handle /commands locally without invoking agents."""
+        parts = text.strip().split(maxsplit=1)
+        command = parts[0].lower().split("@")[0]  # Strip @bot_username suffix
+        args = parts[1].strip() if len(parts) > 1 else ""
+        topic_id = message.get("message_thread_id")
+
+        if self._commands is None:
+            return
+
+        try:
+            if command == "/status":
+                response = await self._commands.cmd_status()
+            elif command == "/health":
+                if not args:
+                    response = "Usage: /health &lt;agent_name&gt;\nExample: /health apollo"
+                else:
+                    response = await self._commands.cmd_health(args.lower())
+            elif command == "/metrics":
+                response = await self._commands.cmd_metrics()
+            elif command == "/logs":
+                if not args:
+                    response = "Usage: /logs &lt;agent_name&gt;\nExample: /logs apollo"
+                else:
+                    response = await self._commands.cmd_logs(args.lower())
+            else:
+                return  # Unknown command -- ignore silently (don't forward to hub either)
+
+            # Send response via system bot to the same topic
+            await self._send_system_message(response, topic_id, parse_mode="HTML")
+        except Exception:
+            logger.exception("Command handler error: %s", command)
+            await self._send_system_message(
+                f"Command failed: {command}\nCheck system logs for details.",
+                topic_id,
+            )
+
+    async def _send_system_message(
+        self,
+        text: str,
+        topic_id: int | None,
+        parse_mode: str | None = None,
+    ) -> None:
+        """Send a message via system bot to a topic."""
+        if self._system_bot is None or not self._http_client:
+            return
+        try:
+            url = f"https://api.telegram.org/bot{self._system_bot.token}/sendMessage"
+            payload: dict = {
+                "chat_id": self._config.chat_id,
+                "text": text[:4096],  # Telegram message limit
+            }
+            if topic_id:
+                payload["message_thread_id"] = topic_id
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
+            await self._http_client.post(url, json=payload, timeout=10.0)
+        except Exception:
+            logger.exception("Failed to send system message")
 
     # ── Typing indicators ──────────────────────────────────────
 
