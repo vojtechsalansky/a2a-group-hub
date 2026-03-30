@@ -255,9 +255,101 @@ def create_app(storage_backend: str | None = None) -> Starlette:
             logger.exception("Error processing Telegram webhook")
             return JSONResponse({"error": "Processing failed"}, status_code=500)
 
+    # -- Message history & send endpoints -----------------------------------
+
+    async def get_channel_messages(request: Request) -> JSONResponse:
+        """GET /api/channels/{channel_id}/messages — Return message history."""
+        channel_id = request.path_params["channel_id"]
+        limit = int(request.query_params.get("limit", "50"))
+        offset = int(request.query_params.get("offset", "0"))
+        messages = await storage.get_messages(channel_id, limit=limit, offset=offset)
+        return JSONResponse([{
+            "message_id": m.message_id,
+            "channel_id": m.channel_id,
+            "sender_id": m.sender_id,
+            "text": m.text,
+            "context_id": m.context_id,
+            "timestamp": m.timestamp.isoformat(),
+            "metadata": m.metadata,
+        } for m in messages])
+
+    async def send_to_channel(request: Request) -> JSONResponse:
+        """POST /api/channels/{channel_id}/send — Send a message to a channel."""
+        channel_id = request.path_params["channel_id"]
+        body = await request.json()
+        text = body.get("text", "")
+        sender_id = body.get("sender_id", "human")
+        if not text:
+            return JSONResponse({"error": "Missing required field: text"}, status_code=400)
+
+        ch = await registry.get_channel(channel_id)
+        if not ch:
+            return JSONResponse({"error": "Channel not found"}, status_code=404)
+
+        # Build A2A MessageSendParams for the hub handler
+        from a2a.types import (
+            Message as A2AMessage, Part, TextPart, Role,
+            MessageSendParams, MessageSendConfiguration,
+        )
+        import uuid as _uuid
+
+        msg = A2AMessage(
+            role=Role.user,
+            parts=[Part(root=TextPart(text=text))],
+            message_id=str(_uuid.uuid4()),
+            context_id=ch.context_id,
+            metadata={"channel_id": channel_id, "sender_id": sender_id},
+        )
+
+        params = MessageSendParams(
+            message=msg,
+            configuration=MessageSendConfiguration(
+                blocking=True,
+                accepted_output_modes=["text"],
+            ),
+        )
+
+        try:
+            result = await hub.on_message_send(params)
+        except Exception as exc:
+            logger.exception("send_to_channel fan-out error")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+        # Serialize result (Task or Message)
+        if hasattr(result, "id"):
+            # Task response with artifacts
+            artifacts = []
+            if result.artifacts:
+                for art in result.artifacts:
+                    art_text = ""
+                    for p in art.parts:
+                        if hasattr(p, "root") and hasattr(p.root, "text"):
+                            art_text += p.root.text
+                    artifacts.append({
+                        "artifact_id": art.artifact_id,
+                        "name": art.name,
+                        "text": art_text,
+                    })
+            return JSONResponse({
+                "task_id": result.id,
+                "status": result.status.state.value if result.status else "unknown",
+                "artifacts": artifacts,
+            })
+        else:
+            # Message response (error case)
+            text_out = ""
+            for p in result.parts:
+                if hasattr(p, "root") and hasattr(p.root, "text"):
+                    text_out += p.root.text
+            return JSONResponse({"message": text_out}, status_code=400)
+
     # -- Build app ----------------------------------------------------------
 
     routes = [
+        # Message history and send (more specific paths first)
+        Route("/api/channels/{channel_id}/messages", get_channel_messages, methods=["GET"]),
+        Route("/api/channels/{channel_id}/send", send_to_channel, methods=["POST"]),
+        # Channel CRUD
         Route("/api/channels", create_channel, methods=["POST"]),
         Route("/api/channels", list_channels, methods=["GET"]),
         Route("/api/channels/{channel_id}", get_channel, methods=["GET"]),

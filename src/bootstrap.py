@@ -9,6 +9,7 @@ restart — only adds missing channels/members, never deletes.
 from __future__ import annotations
 
 import logging
+import os
 
 from src.channels.models import ChannelMember, MemberRole
 from src.channels.registry import ChannelRegistry
@@ -51,7 +52,14 @@ _SERVICE_NAMES: dict[str, str] = {
 
 
 def _agent_url(agent_id: str) -> str:
-    """Build the A2A endpoint URL for an agent on the Docker network."""
+    """Build the A2A endpoint URL for an agent.
+
+    Supports AGENT_URL_TEMPLATE env var for non-Docker environments (e.g. brAIn).
+    Template uses {agent_id} placeholder: http://localhost:3000/api/a2a/agent-proxy?agent={agent_id}
+    """
+    url_template = os.environ.get("AGENT_URL_TEMPLATE")
+    if url_template:
+        return url_template.replace("{agent_id}", agent_id)
     service = _SERVICE_NAMES.get(agent_id, agent_id)
     port = AGENT_PORTS[agent_id]
     return f"http://{service}:{port}/"
@@ -111,6 +119,25 @@ OPENCLAW_CHANNELS: list[dict] = [
 ]
 
 
+# brAIn dashboard agent channels (used when BRAIN_MODE=true)
+BRAIN_CHANNELS: list[dict] = [
+    {
+        "channel_id": "main",
+        "name": "#main",
+        "owner": "main",
+        "members": ["researcher", "infrastructure", "knowledge-curator"],
+        "observers": [],
+    },
+    {
+        "channel_id": "claude-code",
+        "name": "#claude-code",
+        "owner": "claude_code",
+        "members": [],
+        "observers": [],
+    },
+]
+
+
 def _build_member(agent_id: str, role: MemberRole) -> ChannelMember:
     return ChannelMember(
         agent_id=agent_id,
@@ -121,10 +148,19 @@ def _build_member(agent_id: str, role: MemberRole) -> ChannelMember:
 
 
 async def bootstrap_channels(registry: ChannelRegistry) -> None:
-    """Create OpenClaw channels and register agents. Idempotent."""
-    existing = {ch.channel_id: ch for ch in await registry.list_channels()}
+    """Create channels and register agents. Idempotent.
 
-    for chan_def in OPENCLAW_CHANNELS:
+    When BRAIN_MODE=true, uses brAIn agent channels instead of OpenClaw topology.
+    """
+    existing = {ch.channel_id: ch for ch in await registry.list_channels()}
+    channels_to_use = (
+        BRAIN_CHANNELS
+        if os.environ.get("BRAIN_MODE", "").lower() in ("true", "1", "yes")
+        else OPENCLAW_CHANNELS
+    )
+    logger.info("Bootstrap mode: %s (%d channels)", "brain" if channels_to_use is BRAIN_CHANNELS else "openclaw", len(channels_to_use))
+
+    for chan_def in channels_to_use:
         cid = chan_def["channel_id"]
         channel = existing.get(cid)
 
@@ -158,5 +194,5 @@ async def bootstrap_channels(registry: ChannelRegistry) -> None:
 
     logger.info(
         "Bootstrap complete: %d channels configured",
-        len(OPENCLAW_CHANNELS),
+        len(channels_to_use),
     )
