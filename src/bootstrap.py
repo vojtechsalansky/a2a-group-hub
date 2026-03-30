@@ -122,10 +122,17 @@ OPENCLAW_CHANNELS: list[dict] = [
 # brAIn dashboard agent channels (used when BRAIN_MODE=true)
 BRAIN_CHANNELS: list[dict] = [
     {
+        "channel_id": "team",
+        "name": "#team",
+        "owner": "main",
+        "members": ["researcher", "infrastructure", "knowledge-curator", "human"],
+        "observers": [],
+    },
+    {
         "channel_id": "main",
         "name": "#main",
         "owner": "main",
-        "members": ["researcher", "infrastructure", "knowledge-curator", "human"],
+        "members": ["human"],
         "observers": [],
     },
     {
