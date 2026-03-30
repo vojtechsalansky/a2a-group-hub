@@ -125,7 +125,7 @@ BRAIN_CHANNELS: list[dict] = [
         "channel_id": "team",
         "name": "#team",
         "owner": "main",
-        "members": ["researcher", "infrastructure", "knowledge-curator", "human"],
+        "members": ["researcher", "infrastructure", "knowledge-curator", "claude_code", "human"],
         "observers": [],
     },
     {
