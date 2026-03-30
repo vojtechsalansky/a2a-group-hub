@@ -23,6 +23,7 @@ from a2a.types import AgentCapabilities, AgentCard, AgentSkill
 
 from src.channels.models import Channel, ChannelMember, MemberRole
 from src.channels.registry import ChannelRegistry
+from src.hub.graphiti_search import GraphitiSearchClient
 from src.hub.handler import GroupChatHub
 from src.observability.metrics import MetricsCollector
 from src.storage.memory import InMemoryBackend
@@ -120,7 +121,14 @@ def create_app(storage_backend: str | None = None) -> Starlette:
 
     metrics = MetricsCollector()
     registry = ChannelRegistry(storage)
-    hub = GroupChatHub(registry=registry, storage=storage, router=router, metrics=metrics)
+    graphiti_search = GraphitiSearchClient()
+    hub = GroupChatHub(
+        registry=registry,
+        storage=storage,
+        router=router,
+        metrics=metrics,
+        graphiti_search=graphiti_search,
+    )
 
     # -- REST route handlers ------------------------------------------------
 
@@ -386,6 +394,9 @@ def create_app(storage_backend: str | None = None) -> Starlette:
             logger.info("BOOTSTRAP_CHANNELS enabled — running channel bootstrap")
             await bootstrap_channels(registry)
 
+        # Initialize Graphiti search (fire-and-forget: works or silently disabled)
+        await graphiti_search.initialize()
+
         if router:
             await router.initialize()
             router_refresh_task = await router.start_refresh_loop(300.0)
@@ -405,6 +416,7 @@ def create_app(storage_backend: str | None = None) -> Starlette:
             router_refresh_task.cancel()
         if telegram_bridge is not None:
             await telegram_bridge.stop()
+        await graphiti_search.close()
 
     # -- A2A Protocol endpoint (JSON-RPC) ------------------------------------
 

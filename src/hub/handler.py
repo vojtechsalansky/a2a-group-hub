@@ -25,6 +25,7 @@ from src.channels.permissions import PermissionError, check_can_send
 from src.channels.registry import ChannelRegistry
 from src.hub.aggregator import Aggregator, AggregationStrategy
 from src.hub.fanout import CircuitBreaker, FanOutEngine, FanOutResult
+from src.hub.graphiti_search import GraphitiSearchClient
 from src.observability.metrics import MetricsCollector
 from src.storage.base import StorageBackend, StoredMessage
 
@@ -45,11 +46,13 @@ class GroupChatHub(RequestHandler):
         storage: StorageBackend,
         router=None,
         metrics: MetricsCollector | None = None,
+        graphiti_search: GraphitiSearchClient | None = None,
     ) -> None:
         self.registry = registry
         self.storage = storage
         self._router = router
         self._metrics = metrics
+        self._graphiti_search = graphiti_search
         self._circuit_breaker = CircuitBreaker()
         self._fanout_engine = FanOutEngine(circuit_breaker=self._circuit_breaker)
         self._aggregator = Aggregator()
@@ -57,6 +60,8 @@ class GroupChatHub(RequestHandler):
 
     async def close(self) -> None:
         await self._fanout_engine.close()
+        if self._graphiti_search:
+            await self._graphiti_search.close()
 
     # -- Channel resolution -------------------------------------------------
 
@@ -102,6 +107,16 @@ class GroupChatHub(RequestHandler):
         except Exception:
             logger.debug("Memory recall unavailable")
         return memory_context
+
+    async def _search_graphiti(self, text: str) -> str:
+        """Search Graphiti knowledge graph for relevant facts."""
+        if not self._graphiti_search:
+            return ""
+        try:
+            return await self._graphiti_search.search_facts(query=text, num_results=5)
+        except Exception:
+            logger.debug("Graphiti search failed in handler")
+            return ""
 
     # -- Two-phase fan-out helpers -------------------------------------------
 
@@ -255,9 +270,21 @@ class GroupChatHub(RequestHandler):
             context_id=channel.context_id,
         ))
 
-        # Memory recall
+        # Memory recall + Graphiti search in parallel
         incoming_id = params.message.message_id or ""
-        memory_context = await self._recall_memory(channel, text, incoming_id)
+        rag_task = self._recall_memory(channel, text, incoming_id)
+        graphiti_task = self._search_graphiti(text)
+        memory_context_parts = await asyncio.gather(rag_task, graphiti_task, return_exceptions=True)
+
+        # Assemble memory_context from both sources
+        memory_parts: list[str] = []
+        for part in memory_context_parts:
+            if isinstance(part, str) and part:
+                memory_parts.append(part)
+            elif isinstance(part, Exception):
+                logger.debug("Context enrichment source failed: %s", part)
+        memory_context = "\n\n".join(memory_parts)
+
         msg_meta = dict(params.message.metadata or {})
         if memory_context:
             msg_meta["memory_context"] = memory_context
@@ -338,10 +365,22 @@ class GroupChatHub(RequestHandler):
             self._metrics.record_message()
             self._metrics.record_channel_message(channel.channel_id)
 
-        # Memory recall
+        # Memory recall + Graphiti search in parallel
         text = self._extract_text(params.message)
         incoming_id = params.message.message_id or ""
-        memory_context = await self._recall_memory(channel, text, incoming_id)
+        rag_task = self._recall_memory(channel, text, incoming_id)
+        graphiti_task = self._search_graphiti(text)
+        memory_context_parts = await asyncio.gather(rag_task, graphiti_task, return_exceptions=True)
+
+        # Assemble memory_context from both sources
+        memory_parts: list[str] = []
+        for part in memory_context_parts:
+            if isinstance(part, str) and part:
+                memory_parts.append(part)
+            elif isinstance(part, Exception):
+                logger.debug("Context enrichment source failed: %s", part)
+        memory_context = "\n\n".join(memory_parts)
+
         msg_meta = dict(params.message.metadata or {})
         if memory_context:
             msg_meta["memory_context"] = memory_context
