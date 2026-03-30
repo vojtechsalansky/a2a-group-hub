@@ -139,7 +139,7 @@ BRAIN_CHANNELS: list[dict] = [
         "channel_id": "claude-code",
         "name": "#claude-code",
         "owner": "claude_code",
-        "members": ["human"],
+        "members": ["main", "human"],
         "observers": [],
     },
     {
@@ -167,10 +167,12 @@ BRAIN_CHANNELS: list[dict] = [
 
 
 def _build_member(agent_id: str, role: MemberRole) -> ChannelMember:
+    # Human has no agent-proxy — sends via REST API, not fan-out
+    url = "" if agent_id == "human" else _agent_url(agent_id)
     return ChannelMember(
         agent_id=agent_id,
         name=agent_id.capitalize(),
-        url=_agent_url(agent_id),
+        url=url,
         role=role,
     )
 

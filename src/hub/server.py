@@ -300,12 +300,14 @@ def create_app(storage_backend: str | None = None) -> Starlette:
         )
         import uuid as _uuid
 
+        # Pass through any extra metadata (e.g., recipient_id for directed messages)
+        extra_meta = body.get("metadata", {}) if isinstance(body.get("metadata"), dict) else {}
         msg = A2AMessage(
             role=Role.user,
             parts=[Part(root=TextPart(text=text))],
             message_id=str(_uuid.uuid4()),
             context_id=ch.context_id,
-            metadata={"channel_id": channel_id, "sender_id": sender_id},
+            metadata={"channel_id": channel_id, "sender_id": sender_id, **extra_meta},
         )
 
         params = MessageSendParams(

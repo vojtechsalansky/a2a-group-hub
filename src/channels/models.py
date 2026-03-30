@@ -49,7 +49,8 @@ class Channel:
     def get_peers(self, exclude_agent_id: str | None = None) -> list[ChannelMember]:
         return [m for m in self.members.values() if m.agent_id != exclude_agent_id]
     def get_sendable_peers(self, exclude_agent_id: str | None = None) -> list[ChannelMember]:
-        return [m for m in self.members.values() if m.agent_id != exclude_agent_id and m.role.can_send]
+        """Members with URL that can receive fan-out. Members without URL (e.g. human) send via REST only."""
+        return [m for m in self.members.values() if m.agent_id != exclude_agent_id and m.role.can_send and m.url]
     def get_observers(self) -> list[ChannelMember]:
         return [m for m in self.members.values() if m.role == MemberRole.observer]
     def get_member_by_url(self, url: str) -> ChannelMember | None:

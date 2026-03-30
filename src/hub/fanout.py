@@ -58,13 +58,25 @@ class FanOutEngine:
         context_id: str,
         message_metadata: dict | None = None,
     ) -> list[FanOutResult]:
-        """Broadcast to all peers. Observers get fire-and-forget. Returns only member results."""
+        """Broadcast to peers. If metadata contains 'recipient_id', only that agent receives.
+        Otherwise broadcasts to all peers (excluding sender). Observers always fire-and-forget."""
+
+        meta = message_metadata or {}
+        recipient_id = meta.get("recipient_id")
 
         sendable = channel.get_sendable_peers(exclude_agent_id=sender_id)
+
+        # Directed message: only send to specific recipient
+        if recipient_id:
+            sendable = [m for m in sendable if m.agent_id == recipient_id]
+            if not sendable:
+                logger.warning(f"Recipient '{recipient_id}' not found in #{channel.name}")
+
         observers = [o for o in channel.get_observers() if o.agent_id != sender_id]
 
         logger.info(
             f"Fan-out in #{channel.name}: {len(sendable)} members, {len(observers)} observers"
+            + (f" (directed to {recipient_id})" if recipient_id else "")
         )
 
         # Fire-and-forget to observers (tracked with error logging callback)
