@@ -86,6 +86,10 @@ def create_app(storage_backend: str | None = None) -> Starlette:
             url=os.environ.get("QDRANT_URL", "http://localhost:6333"),
         )
         storage: StorageBackend = CompositeBackend(neo4j_backend=neo4j, qdrant_backend=qdrant)
+    elif backend == "sqlite":
+        from src.storage.sqlite_backend import SqliteBackend
+        db_path = os.environ.get("SQLITE_DB_PATH", "data/a2a-hub.db")
+        storage = SqliteBackend(db_path=db_path)
     elif backend == "memory":
         storage = InMemoryBackend()
     else:
