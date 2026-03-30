@@ -97,7 +97,10 @@ def create_app(storage_backend: str | None = None) -> Starlette:
         storage = InMemoryBackend()
 
     registry = ChannelRegistry(storage)
-    hub = GroupChatHub(registry=registry, storage=storage)
+
+    from src.notifications.webhooks import WebhookDispatcher
+    webhook_dispatcher = WebhookDispatcher()
+    hub = GroupChatHub(registry=registry, storage=storage, webhook_dispatcher=webhook_dispatcher)
 
     # -- REST route handlers ------------------------------------------------
 
@@ -380,6 +383,23 @@ def create_app(storage_backend: str | None = None) -> Starlette:
             logger.info("BOOTSTRAP_CHANNELS enabled — running channel bootstrap")
             await bootstrap_channels(registry)
 
+        # Auto-register webhook for all channels if WEBHOOK_URL is set
+        webhook_url = os.environ.get("WEBHOOK_URL")
+        if webhook_url:
+            from src.storage.base import Webhook
+            channels = await registry.list_channels()
+            for ch in channels:
+                existing_wh = await storage.list_webhooks(ch.channel_id)
+                already_registered = any(w.url == webhook_url for w in existing_wh)
+                if not already_registered:
+                    wh = Webhook(
+                        webhook_id=f"brain-{ch.channel_id}",
+                        url=webhook_url,
+                        events=["message", "member_join"],
+                    )
+                    await storage.save_webhook(ch.channel_id, wh)
+                    logger.info("Registered webhook %s for channel %s", webhook_url, ch.channel_id)
+
         if os.environ.get("TELEGRAM_ENABLED", "").lower() in ("true", "1", "yes"):
             from src.telegram.config import TelegramConfig
             from src.telegram.bridge import TelegramBridge
@@ -393,6 +413,7 @@ def create_app(storage_backend: str | None = None) -> Starlette:
         # Shutdown
         if telegram_bridge is not None:
             await telegram_bridge.stop()
+        await hub.close()
 
     # -- A2A Protocol endpoint (JSON-RPC) ------------------------------------
 

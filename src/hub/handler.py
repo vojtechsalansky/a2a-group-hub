@@ -31,15 +31,35 @@ logger = logging.getLogger("a2a-hub.handler")
 
 class GroupChatHub(RequestHandler):
 
-    def __init__(self, registry: ChannelRegistry, storage: StorageBackend) -> None:
+    def __init__(self, registry: ChannelRegistry, storage: StorageBackend,
+                 webhook_dispatcher=None) -> None:
         self.registry = registry
         self.storage = storage
         self._fanout_engine = FanOutEngine()
         self._aggregator = Aggregator()
         self._tasks: dict[str, Task] = {}
+        self._webhook_dispatcher = webhook_dispatcher
 
     async def close(self) -> None:
         await self._fanout_engine.close()
+        if self._webhook_dispatcher:
+            await self._webhook_dispatcher.close()
+
+    async def _fire_webhook(self, channel_id: str, event_type: str, data: dict) -> None:
+        """Fire webhook for channel event if dispatcher is configured."""
+        if not self._webhook_dispatcher:
+            return
+        webhooks = await self.storage.list_webhooks(channel_id)
+        if not webhooks:
+            return
+        from src.notifications.webhooks import WebhookEvent
+        event = WebhookEvent(
+            event=event_type,
+            channel_id=channel_id,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            data=data,
+        )
+        await self._webhook_dispatcher.dispatch(webhooks, event)
 
     # -- Channel resolution -------------------------------------------------
 
@@ -89,13 +109,22 @@ class GroupChatHub(RequestHandler):
 
         # Extract text and persist incoming message
         text = self._extract_text(params.message)
+        msg_id = params.message.message_id or str(uuid.uuid4())
         await self.storage.save_message(channel.channel_id, StoredMessage(
-            message_id=params.message.message_id or str(uuid.uuid4()),
+            message_id=msg_id,
             channel_id=channel.channel_id,
             sender_id=sender_id or "unknown",
             text=text,
             context_id=channel.context_id,
         ))
+
+        # Fire webhook for user message
+        await self._fire_webhook(channel.channel_id, "message", {
+            "message_id": msg_id,
+            "sender_id": sender_id or "unknown",
+            "text": text,
+            "context_id": channel.context_id,
+        })
 
         # Fan-out
         meta = params.message.metadata or {}
@@ -113,7 +142,7 @@ class GroupChatHub(RequestHandler):
             message_metadata=params.message.metadata,
         )
 
-        # Persist responses
+        # Persist responses and fire webhooks
         for r in results:
             if r.response_text:
                 await self.storage.save_message(channel.channel_id, StoredMessage(
@@ -123,6 +152,13 @@ class GroupChatHub(RequestHandler):
                     text=r.response_text,
                     context_id=channel.context_id,
                 ))
+                # Fire webhook for agent response
+                await self._fire_webhook(channel.channel_id, "message", {
+                    "sender_id": r.agent_id,
+                    "agent_name": r.agent_name,
+                    "text": r.response_text,
+                    "context_id": channel.context_id,
+                })
 
         # Aggregate
         task_id = str(uuid.uuid4())
