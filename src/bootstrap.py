@@ -146,21 +146,21 @@ BRAIN_CHANNELS: list[dict] = [
         "channel_id": "researcher",
         "name": "#researcher",
         "owner": "researcher",
-        "members": ["human"],
+        "members": ["main", "human"],
         "observers": [],
     },
     {
         "channel_id": "infrastructure",
         "name": "#infrastructure",
         "owner": "infrastructure",
-        "members": ["human"],
+        "members": ["main", "human"],
         "observers": [],
     },
     {
         "channel_id": "knowledge-curator",
         "name": "#knowledge-curator",
         "owner": "knowledge-curator",
-        "members": ["human"],
+        "members": ["main", "human"],
         "observers": [],
     },
 ]
@@ -199,7 +199,7 @@ async def bootstrap_channels(registry: ChannelRegistry) -> None:
                 name=chan_def["name"],
                 channel_id=cid,
                 default_aggregation="all",
-                agent_timeout=120,
+                agent_timeout=600,
             )
             logger.info("Created channel %s", cid)
         else:
@@ -213,14 +213,19 @@ async def bootstrap_channels(registry: ChannelRegistry) -> None:
         for agent_id in chan_def["observers"]:
             desired.append((agent_id, MemberRole.observer))
 
-        # Add missing members
+        # Add missing members and update existing (URL/role changes)
         for agent_id, role in desired:
+            expected = _build_member(agent_id, role)
             if agent_id not in channel.members:
-                member = _build_member(agent_id, role)
-                await registry.add_member(cid, member)
+                await registry.add_member(cid, expected)
                 logger.info("Added %s to %s as %s", agent_id, cid, role.value)
             else:
-                logger.debug("%s already in %s", agent_id, cid)
+                existing_member = channel.members[agent_id]
+                if existing_member.url != expected.url or existing_member.role != expected.role:
+                    await registry.add_member(cid, expected)
+                    logger.info("Updated %s in %s (url/role changed)", agent_id, cid)
+                else:
+                    logger.debug("%s already in %s", agent_id, cid)
 
     logger.info(
         "Bootstrap complete: %d channels configured",

@@ -34,7 +34,8 @@ class FanOutResult:
 class FanOutEngine:
 
     def __init__(self, http_client: httpx.AsyncClient | None = None) -> None:
-        self._http_client = http_client or httpx.AsyncClient(timeout=120.0)
+        default_timeout = float(os.environ.get("FANOUT_TIMEOUT_SECONDS", "600"))
+        self._http_client = http_client or httpx.AsyncClient(timeout=default_timeout)
         self._owns_client = http_client is None
 
     async def close(self) -> None:
@@ -64,11 +65,16 @@ class FanOutEngine:
         meta = message_metadata or {}
         recipient_id = meta.get("recipient_id")
 
+        # DEBUG: log metadata to trace recipient_id issues
+        print(f"[fan_out] channel={channel.channel_id} sender={sender_id} recipient_id={recipient_id} metadata_keys={list(meta.keys())}", flush=True)
+
         sendable = channel.get_sendable_peers(exclude_agent_id=sender_id)
 
         # Directed message: only send to specific recipient
         if recipient_id:
+            before = [m.agent_id for m in sendable]
             sendable = [m for m in sendable if m.agent_id == recipient_id]
+            print(f"[fan_out] directed filter: {before} -> {[m.agent_id for m in sendable]}", flush=True)
             if not sendable:
                 logger.warning(f"Recipient '{recipient_id}' not found in #{channel.name}")
 

@@ -281,11 +281,17 @@ def create_app(storage_backend: str | None = None) -> Starlette:
         } for m in messages])
 
     async def send_to_channel(request: Request) -> JSONResponse:
-        """POST /api/channels/{channel_id}/send — Send a message to a channel."""
+        """POST /api/channels/{channel_id}/send — Send a message to a channel.
+
+        When `async: true` in body: save message + schedule fan-out in background,
+        return immediately with message_id (202 Accepted).
+        Default (async=false): blocking fan-out, returns agent responses.
+        """
         channel_id = request.path_params["channel_id"]
         body = await request.json()
         text = body.get("text", "")
         sender_id = body.get("sender_id", "human")
+        is_async = body.get("async", False)
         if not text:
             return JSONResponse({"error": "Missing required field: text"}, status_code=400)
 
@@ -313,11 +319,37 @@ def create_app(storage_backend: str | None = None) -> Starlette:
         params = MessageSendParams(
             message=msg,
             configuration=MessageSendConfiguration(
-                blocking=True,
+                blocking=not is_async,
                 accepted_output_modes=["text"],
             ),
         )
 
+        if is_async:
+            # Save message immediately, fan-out in background
+            msg_id, error = await hub.save_message(params)
+            if error:
+                return JSONResponse({"error": error}, status_code=400)
+
+            # Inter-agent messages (non-human sender): save only, no fan-out.
+            # The message stays in channel history and agents see it in context
+            # on the next user-triggered dispatch.
+            if sender_id != "human":
+                logger.info("Inter-agent message from %s in #%s — saved, no dispatch", sender_id, channel_id)
+                return JSONResponse({
+                    "status": "accepted",
+                    "message_id": msg_id,
+                    "channel_id": channel_id,
+                    "note": "inter-agent message saved, no fan-out",
+                }, status_code=202)
+
+            hub.schedule_dispatch(params)
+            return JSONResponse({
+                "status": "accepted",
+                "message_id": msg_id,
+                "channel_id": channel_id,
+            }, status_code=202)
+
+        # Blocking mode (backward compatible)
         try:
             result = await hub.on_message_send(params)
         except Exception as exc:

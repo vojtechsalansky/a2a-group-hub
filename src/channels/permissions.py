@@ -12,13 +12,18 @@ class PermissionError(Exception):
 
 
 def check_can_send(channel: Channel, sender_id: str | None) -> None:
-    """Verify sender has permission to send messages in this channel."""
+    """Verify sender has permission to send messages in this channel.
+
+    Non-members CAN send — enables inter-agent communication (e.g. researcher
+    sending a number to main via #main channel). The message is saved and
+    fans out to channel members. Observers still cannot send.
+    """
     if sender_id is None:
         return  # external/hub messages always allowed
 
     member = channel.members.get(sender_id)
     if not member:
-        raise PermissionError(f"Agent '{sender_id}' is not a member of #{channel.name}")
+        return  # Non-members can send for inter-agent communication
     if not member.role.can_send:
         raise PermissionError(
             f"Agent '{sender_id}' is an observer in #{channel.name} and cannot send messages"

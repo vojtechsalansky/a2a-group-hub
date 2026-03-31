@@ -39,8 +39,12 @@ class GroupChatHub(RequestHandler):
         self._aggregator = Aggregator()
         self._tasks: dict[str, Task] = {}
         self._webhook_dispatcher = webhook_dispatcher
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def close(self) -> None:
+        # Cancel any pending background dispatch tasks
+        for task in self._background_tasks:
+            task.cancel()
         await self._fanout_engine.close()
         if self._webhook_dispatcher:
             await self._webhook_dispatcher.close()
@@ -80,6 +84,107 @@ class GroupChatHub(RequestHandler):
                     return ch, meta.get("sender_id")
 
         return None, None
+
+    # -- Async dispatch (non-blocking) ----------------------------------------
+
+    async def save_message(self, params: MessageSendParams) -> tuple[str | None, str | None]:
+        """Save incoming message to storage without fan-out. Returns (message_id, error)."""
+        channel, sender_id = await self._resolve_channel(params)
+        if not channel:
+            return None, "Could not resolve channel."
+        try:
+            check_can_send(channel, sender_id)
+        except PermissionError as e:
+            return None, str(e)
+
+        text = self._extract_text(params.message)
+        msg_id = params.message.message_id or str(uuid.uuid4())
+        await self.storage.save_message(channel.channel_id, StoredMessage(
+            message_id=msg_id,
+            channel_id=channel.channel_id,
+            sender_id=sender_id or "unknown",
+            text=text,
+            context_id=channel.context_id,
+        ))
+        await self._fire_webhook(channel.channel_id, "message", {
+            "message_id": msg_id,
+            "sender_id": sender_id or "unknown",
+            "text": text,
+            "context_id": channel.context_id,
+        })
+        return msg_id, None
+
+    async def dispatch_async(self, params: MessageSendParams) -> None:
+        """Run fan-out in background. Saves responses when done."""
+        logger.info("dispatch_async: starting")
+        channel, sender_id = await self._resolve_channel(params)
+        if not channel:
+            logger.warning("dispatch_async: channel not resolved")
+            return
+
+        logger.info("dispatch_async: channel=%s sender=%s", channel.channel_id, sender_id)
+        meta = params.message.metadata or {}
+        strategy_name = meta.get("aggregation", channel.default_aggregation)
+        try:
+            strategy = AggregationStrategy(strategy_name)
+        except ValueError:
+            strategy = AggregationStrategy.all
+
+        try:
+            results = await self._fanout_engine.fan_out(
+                channel=channel,
+                message_parts=params.message.parts,
+                sender_id=sender_id,
+                context_id=channel.context_id,
+                message_metadata=params.message.metadata,
+            )
+        except Exception as exc:
+            logger.exception("Background dispatch FAILED for #%s: %s", channel.name, exc)
+            return
+
+        logger.info("dispatch_async: fan-out complete, %d results", len(results))
+        for r in results:
+            text = r.response_text
+            if r.error and not text:
+                # Save error as visible message so user knows what happened
+                text = f"[Agent error: {r.error}]"
+                logger.error("dispatch_async: agent %s error: %s", r.agent_id, r.error)
+            if text:
+                await self.storage.save_message(channel.channel_id, StoredMessage(
+                    message_id=str(uuid.uuid4()),
+                    channel_id=channel.channel_id,
+                    sender_id=r.agent_id,
+                    text=text,
+                    context_id=channel.context_id,
+                ))
+                await self._fire_webhook(channel.channel_id, "message", {
+                    "sender_id": r.agent_id,
+                    "agent_name": r.agent_name,
+                    "text": text,
+                    "context_id": channel.context_id,
+                })
+
+        channel.message_count += 1
+        logger.info("Background dispatch completed for #%s (%d results)", channel.name, len(results))
+
+    def schedule_dispatch(self, params: MessageSendParams) -> None:
+        """Schedule fan-out as a background asyncio task."""
+        channel_id = params.message.metadata.get('channel_id', 'unknown') if params.message.metadata else 'unknown'
+        logger.info("schedule_dispatch: scheduling for channel=%s", channel_id)
+        task = asyncio.create_task(
+            self.dispatch_async(params),
+            name=f"dispatch-{channel_id}",
+        )
+        self._background_tasks.add(task)
+        def _done(t: asyncio.Task) -> None:
+            self._background_tasks.discard(t)
+            if t.cancelled():
+                logger.warning("dispatch task cancelled: %s", t.get_name())
+            elif t.exception():
+                logger.error("dispatch task exception: %s — %s", t.get_name(), t.exception())
+            else:
+                logger.info("dispatch task completed: %s", t.get_name())
+        task.add_done_callback(_done)
 
     # -- Core handlers ------------------------------------------------------
 

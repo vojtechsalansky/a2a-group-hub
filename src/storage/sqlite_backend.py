@@ -161,8 +161,9 @@ class SqliteBackend(StorageBackend):
         self.db.commit()
 
     async def get_messages(self, channel_id: str, limit: int = 50, offset: int = 0) -> list[StoredMessage]:
+        # Subquery: get latest N messages (DESC), then re-order ASC for chronological display
         cur = self.db.execute(
-            "SELECT * FROM messages WHERE channel_id = ? ORDER BY timestamp ASC LIMIT ? OFFSET ?",
+            "SELECT * FROM (SELECT * FROM messages WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?) ORDER BY timestamp ASC",
             (channel_id, limit, offset),
         )
         cur.row_factory = sqlite3.Row
